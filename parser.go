@@ -789,6 +789,8 @@ func (p *parser) parseArgs() ([]*Expr, error) {
 	if _, err := p.expect(tokLParen); err != nil {
 		return nil, err
 	}
+	p.exprNL++
+	defer func() { p.exprNL-- }()
 	var args []*Expr
 	p.skipNewlines()
 	for !p.match(tokRParen) {

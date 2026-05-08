@@ -57,3 +57,32 @@ func TestParseProgramCallNamedArg(t *testing.T) {
 		t.Fatalf("expected trailing named bgcolor arg, got %#v", last)
 	}
 }
+
+func TestParseProgramMultilineIndicatorNamedArgs(t *testing.T) {
+	program, err := parseProgram(`//@version=6
+indicator(
+  "INTC Research Alpha Subset",
+  shorttitle = "INTC RAlpha Subset",
+  overlay = false
+) 
+`)
+	if err != nil {
+		t.Fatalf("parseProgram: %v", err)
+	}
+	if len(program.Stmts) != 1 || program.Stmts[0].Expr == nil {
+		t.Fatalf("expected single indicator call stmt, got %#v", program.Stmts)
+	}
+	call := program.Stmts[0].Expr
+	if call.Kind != "call" || call.Left == nil || call.Left.Kind != "ident" || call.Left.Name != "indicator" {
+		t.Fatalf("expected indicator call, got %#v", call)
+	}
+	if len(call.Args) != 3 {
+		t.Fatalf("expected 3 indicator args, got %d", len(call.Args))
+	}
+	for i, want := range []string{"shorttitle", "overlay"} {
+		arg := call.Args[i+1]
+		if arg == nil || arg.Kind != "named_arg" || arg.Name != want {
+			t.Fatalf("expected arg %d to be named %q, got %#v", i+1, want, arg)
+		}
+	}
+}

@@ -17,6 +17,9 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 	}
 	name := expr.Left.Name
 	if isUnsupportedFeatureCallName(name) {
+		if strings.HasPrefix(name, "alert") {
+			return nil, fmt.Errorf("unsupported feature: %s", name)
+		}
 		if v, ok, err := r.callRegisteredFunction(name, expr.Args); ok || err != nil {
 			return v, err
 		}
@@ -94,7 +97,10 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 }
 
 func isUnsupportedFeatureCallName(name string) bool {
-	return strings.HasPrefix(name, "strategy.") || strings.HasPrefix(name, "request.") || strings.HasPrefix(name, "plot")
+	if name == "alert" || name == "alertcondition" {
+		return false
+	}
+	return strings.HasPrefix(name, "strategy.") || strings.HasPrefix(name, "request.") || strings.HasPrefix(name, "plot") || strings.HasPrefix(name, "alert")
 }
 
 func (r *Runtime) callRegisteredFunction(name string, argExprs []*Expr) (interface{}, bool, error) {

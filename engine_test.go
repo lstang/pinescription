@@ -963,6 +963,30 @@ func TestAlertSink(t *testing.T) {
 	}
 }
 
+func TestAlertPrefixedRegisteredFunctionBlocked(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
+	called := false
+	e.RegisterFunction("alert.webhook", func(args ...any) (any, error) {
+		called = true
+		return nil, nil
+	})
+
+	b, err := e.Compile(`alert.webhook("secret")`)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	_, err = e.Execute(b)
+	if err == nil || !strings.Contains(err.Error(), "unsupported feature: alert.webhook") {
+		t.Fatalf("expected unsupported feature error, got %v", err)
+	}
+	if called {
+		t.Fatalf("expected registered alert-prefixed function to be blocked")
+	}
+}
+
 func TestSymbolsFromRegisteredProviders(t *testing.T) {
 	e := NewEngine()
 	e.RegisterMarketDataProvider(providerWithClose("AAA", 1, 2, 3))

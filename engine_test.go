@@ -1620,7 +1620,6 @@ array.get(sl, 0) + p + s + inc + idx + z
 	}
 }
 
-
 func TestArrayNewRejectsNegativeSize(t *testing.T) {
 	e := NewEngine()
 	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))

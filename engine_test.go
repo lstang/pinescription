@@ -1620,6 +1620,36 @@ array.get(sl, 0) + p + s + inc + idx + z
 	}
 }
 
+func TestArrayNewRejectsNegativeSize(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
+	b, err := e.Compile("var a = array.new_int(-1, 0)\narray.size(a)")
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	_, err = e.Execute(b)
+	if err == nil || !strings.Contains(err.Error(), "array size cannot be negative") {
+		t.Fatalf("expected negative array size error, got %v", err)
+	}
+}
+
+func TestArrayNewRejectsTooLargeSize(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
+	b, err := e.Compile("var a = array.new_int(2000000, 0)\narray.size(a)")
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	_, err = e.Execute(b)
+	if err == nil || !strings.Contains(err.Error(), "array size exceeds maximum allowed size") {
+		t.Fatalf("expected oversized array error, got %v", err)
+	}
+}
+
 func TestArrayAdvancedBuiltinsCoverage(t *testing.T) {
 	script := `
 var a = array.from(-1.0, 2.0, -3.0, 2.0, 5.0)

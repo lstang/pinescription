@@ -80,6 +80,8 @@ type pineArray struct {
 	items []interface{}
 }
 
+const maxArrayNewSize = 1 << 20
+
 func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) (interface{}, bool, error) {
 	switch name {
 	case "int":
@@ -420,6 +422,12 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		if len(args) > 0 {
 			f, _ := toFloat(args[0])
 			sz = int(f)
+		}
+		if sz < 0 {
+			return nil, true, fmt.Errorf("array size cannot be negative")
+		}
+		if sz > maxArrayNewSize {
+			return nil, true, fmt.Errorf("array size exceeds maximum allowed size (%d)", maxArrayNewSize)
 		}
 		var init interface{}
 		if len(args) > 1 {

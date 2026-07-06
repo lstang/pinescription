@@ -156,7 +156,12 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 	case "while":
 		var last interface{}
 		hasLast := false
+		iterations := 0
 		for {
+			if iterations >= maxLoopIterations {
+				return flow{}, fmt.Errorf("loop iteration limit exceeded: %d", maxLoopIterations)
+			}
+			iterations++
 			c, err := r.eval(stmt.Cond)
 			if err != nil {
 				return flow{}, err

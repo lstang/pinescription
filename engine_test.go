@@ -282,6 +282,24 @@ s
 	}
 }
 
+func TestWhileLoopIterationLimit(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+	b, err := e.Compile(`
+while true
+    1
+1
+`)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	_, err = e.Execute(b)
+	if err == nil || !strings.Contains(err.Error(), "loop iteration limit exceeded") {
+		t.Fatalf("expected loop iteration limit error, got %v", err)
+	}
+}
+
 func TestSwitchStatementWithValue(t *testing.T) {
 	script := `
 var out = 0

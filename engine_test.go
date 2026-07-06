@@ -146,6 +146,17 @@ func TestNamedArgsScriptFunctionOutOfOrder(t *testing.T) {
 	}
 }
 
+func TestDefaultedScriptFunctionParamSupportsSeriesIndexing(t *testing.T) {
+	v := compileExec(t, "prev(src = close + 1) => src[1]\nprev()", 10, 20, 30)
+	got, ok := v.(float64)
+	if !ok {
+		t.Fatalf("expected float64 result, got %T (%v)", v, v)
+	}
+	if got != 21 {
+		t.Fatalf("expected default param to re-evaluate close + 1 at prior bar, got %v", got)
+	}
+}
+
 func TestNamedArgsTypeConstructorUsesDefaultsForSparseArgs(t *testing.T) {
 	v := compileExec(t, "type Pair\n    float left = 3\n    float right = 7\np = Pair.new(right = 11)\np.left + p.right", 1, 2, 3)
 	got, ok := v.(float64)

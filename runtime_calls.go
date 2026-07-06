@@ -505,7 +505,7 @@ func (r *Runtime) callScriptFunction(fn FunctionDef, rawArgs []*Expr, args []int
 		if err != nil {
 			return nil, err
 		}
-		env[p] = v
+		env[p] = wrapSeriesArgument(v, defaultExpr)
 	}
 
 	if fn.Expr != nil {

@@ -201,6 +201,7 @@ func TestNamedArgsBuiltinRejectsMissingRequiredPrefixParam(t *testing.T) {
 	}{
 		{script: "color.new(transp = 25)", want: `missing required argument "color" for color.new`},
 		{script: "box.new(bottom = 4)", want: `missing required argument "left" for box.new`},
+		{script: "table.clear(start_column = 1)", want: `missing required argument "table_id" for table.clear`},
 	} {
 		b, err := e.Compile(tc.script)
 		if err != nil {
@@ -1000,6 +1001,23 @@ myArr.noSuchMethod()
 	}
 	if !strings.Contains(err.Error(), "unknown method") {
 		t.Fatalf("expected unknown method error, got %v", err)
+	}
+}
+
+func TestNamedArgMethodCallWithUnknownReceiverReportsIdentifierError(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
+	b, err := e.Compile(`
+x.clear(start_column = 1)
+`)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	_, err = e.Execute(b)
+	if err == nil || !strings.Contains(err.Error(), "unknown identifier: x") {
+		t.Fatalf("expected unknown identifier error, got %v", err)
 	}
 }
 

@@ -123,6 +123,9 @@ func (r *Runtime) callMethodWithNamedArgs(name string, argExprs []*Expr) (interf
 	}
 	recv, err := r.resolve(recvName)
 	if err != nil {
+		if !r.isKnownDottedCallName(name) {
+			return nil, true, err
+		}
 		return nil, false, nil
 	}
 	builtinName := methodBuiltinNameForReceiver(recv, methodName)
@@ -161,6 +164,22 @@ func (r *Runtime) callMethodWithNamedArgs(name string, argExprs []*Expr) (interf
 		return v, true, err
 	}
 	return nil, false, nil
+}
+
+func (r *Runtime) isKnownDottedCallName(name string) bool {
+	if !strings.Contains(name, ".") {
+		return false
+	}
+	if isHookableDrawingFunctionName(name) || isImplementedBuiltinFunctionName(name) || isUnsupportedFeatureCallName(name) {
+		return true
+	}
+	if r.hasCallParamSpec(name) {
+		return true
+	}
+	if _, ok := r.userFns[name]; ok {
+		return true
+	}
+	return false
 }
 
 func isUnsupportedFeatureCallName(name string) bool {

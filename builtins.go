@@ -80,6 +80,13 @@ type pineArray struct {
 	items []interface{}
 }
 
+func (a *pineArray) PineArrayItems() []interface{} {
+	if a == nil {
+		return nil
+	}
+	return append([]interface{}(nil), a.items...)
+}
+
 const maxArrayNewSize = 1 << 20
 
 func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) (interface{}, bool, error) {
@@ -165,6 +172,30 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 			return nil, true, fmt.Errorf("color.rgb() expects 3 args")
 		}
 		return map[string]interface{}{"r": args[0], "g": args[1], "b": args[2]}, true, nil
+	case "color.from_gradient":
+		if len(args) != 5 {
+			return nil, true, fmt.Errorf("color.from_gradient() expects 5 args")
+		}
+		value, _ := toFloat(args[0])
+		bottom, _ := toFloat(args[1])
+		top, _ := toFloat(args[2])
+		ratio := 0.0
+		if top != bottom {
+			ratio = (value - bottom) / (top - bottom)
+		}
+		if math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+			ratio = 0
+		}
+		ratio = math.Max(0, math.Min(1, ratio))
+		if r1, g1, b1, ok1 := colorRGB(args[3]); ok1 {
+			if r2, g2, b2, ok2 := colorRGB(args[4]); ok2 {
+				return map[string]interface{}{"r": r1 + (r2-r1)*ratio, "g": g1 + (g2-g1)*ratio, "b": b1 + (b2-b1)*ratio}, true, nil
+			}
+		}
+		if ratio < 0.5 {
+			return args[3], true, nil
+		}
+		return args[4], true, nil
 	case "box.new":
 		if len(args) < 4 {
 			return nil, true, fmt.Errorf("box.new() expects at least 4 args")
@@ -211,6 +242,10 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		return map[string]interface{}{"type": "table", "args": args}, true, nil
 	case "table.cell":
 		return nil, true, nil
+	case "table.clear":
+		return nil, true, nil
+	case "table.merge_cells":
+		return nil, true, nil
 	case "linefill.new":
 		return map[string]interface{}{"type": "linefill", "args": args}, true, nil
 	case "barcolor":
@@ -219,6 +254,19 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		return map[string]interface{}{"type": "line", "args": args}, true, nil
 	case "label.new":
 		return map[string]interface{}{"type": "label", "args": args}, true, nil
+	case "label.delete":
+		return nil, true, nil
+	case "polyline.new":
+		return map[string]interface{}{"type": "polyline", "args": args}, true, nil
+	case "polyline.delete":
+		return nil, true, nil
+	case "chart.point.from_index":
+		if len(args) < 2 {
+			return nil, true, fmt.Errorf("chart.point.from_index() expects 2 args")
+		}
+		idx, _ := toFloat(args[0])
+		price, _ := toFloat(args[1])
+		return map[string]interface{}{"type": "chart.point", "index": idx, "price": price}, true, nil
 	case "line.set_xy1":
 		if len(args) != 3 {
 			return nil, true, fmt.Errorf("line.set_xy1() expects 3 args")
@@ -417,7 +465,7 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 			out = append(out, pm.data[k])
 		}
 		return out, true, nil
-	case "array.new_int", "array.new_float", "array.new_bool", "array.new_string", "array.new_box":
+	case "array.new_int", "array.new_float", "array.new_bool", "array.new_string", "array.new_box", "array.new_label", "array.new_polyline", "array.new_chart_point":
 		sz := 0
 		if len(args) > 0 {
 			f, _ := toFloat(args[0])
@@ -1237,10 +1285,17 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		}
 		return m, true, nil
 	case "math.round", "round":
-		if len(args) != 1 {
-			return nil, true, fmt.Errorf("math.round() expects 1 arg")
+		if len(args) < 1 || len(args) > 2 {
+			return nil, true, fmt.Errorf("math.round() expects 1 or 2 args")
 		}
 		n, _ := toFloat(args[0])
+		if len(args) == 2 {
+			precision, _ := toFloat(args[1])
+			factor := math.Pow(10, precision)
+			if factor != 0 && !math.IsInf(factor, 0) && !math.IsNaN(factor) {
+				return math.Round(n*factor) / factor, true, nil
+			}
+		}
 		return math.Round(n), true, nil
 	case "math.floor", "floor":
 		if len(args) != 1 {
@@ -1590,6 +1645,32 @@ func asArrayArg(v interface{}, fn string) ([]interface{}, error) {
 func isPineArrayArg(v interface{}) bool {
 	_, ok := v.(*pineArray)
 	return ok
+}
+
+func colorRGB(v interface{}) (float64, float64, float64, bool) {
+	switch c := v.(type) {
+	case string:
+		if !strings.HasPrefix(c, "#") || len(c) != 7 {
+			return 0, 0, 0, false
+		}
+		r, errR := strconv.ParseInt(c[1:3], 16, 64)
+		g, errG := strconv.ParseInt(c[3:5], 16, 64)
+		b, errB := strconv.ParseInt(c[5:7], 16, 64)
+		if errR != nil || errG != nil || errB != nil {
+			return 0, 0, 0, false
+		}
+		return float64(r), float64(g), float64(b), true
+	case map[string]interface{}:
+		if base, ok := c["base"]; ok {
+			return colorRGB(base)
+		}
+		r, rok := toFloat(c["r"])
+		g, gok := toFloat(c["g"])
+		b, bok := toFloat(c["b"])
+		return r, g, b, rok && gok && bok
+	default:
+		return 0, 0, 0, false
+	}
 }
 
 func arrayNumericValues(v interface{}, fn string) ([]float64, error) {

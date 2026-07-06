@@ -146,6 +146,17 @@ func TestNamedArgsScriptFunctionOutOfOrder(t *testing.T) {
 	}
 }
 
+func TestDefaultedScriptFunctionParamSupportsSeriesIndexing(t *testing.T) {
+	v := compileExec(t, "prev(src = close + 1) => src[1]\nprev()", 10, 20, 30)
+	got, ok := v.(float64)
+	if !ok {
+		t.Fatalf("expected float64 result, got %T (%v)", v, v)
+	}
+	if got != 21 {
+		t.Fatalf("expected default param to re-evaluate close + 1 at prior bar, got %v", got)
+	}
+}
+
 func TestNamedArgsTypeConstructorUsesDefaultsForSparseArgs(t *testing.T) {
 	v := compileExec(t, "type Pair\n    float left = 3\n    float right = 7\np = Pair.new(right = 11)\np.left + p.right", 1, 2, 3)
 	got, ok := v.(float64)
@@ -190,6 +201,7 @@ func TestNamedArgsBuiltinRejectsMissingRequiredPrefixParam(t *testing.T) {
 	}{
 		{script: "color.new(transp = 25)", want: `missing required argument "color" for color.new`},
 		{script: "box.new(bottom = 4)", want: `missing required argument "left" for box.new`},
+		{script: "table.clear(start_column = 1)", want: `missing required argument "table_id" for table.clear`},
 	} {
 		b, err := e.Compile(tc.script)
 		if err != nil {
@@ -271,6 +283,24 @@ s
 	}
 }
 
+func TestWhileLoopIterationLimit(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+	b, err := e.Compile(`
+while true
+    1
+1
+`)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	_, err = e.Execute(b)
+	if err == nil || !strings.Contains(err.Error(), "loop iteration limit exceeded") {
+		t.Fatalf("expected loop iteration limit error, got %v", err)
+	}
+}
+
 func TestSwitchStatementWithValue(t *testing.T) {
 	script := `
 var out = 0
@@ -300,6 +330,44 @@ out
 	f := v.(float64)
 	if f != 2 {
 		t.Fatalf("expected 2, got %v", f)
+	}
+}
+
+func TestSwitchRejectsDuplicateDefaultArms(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{
+			name: "statement",
+			script: `
+var out = 0
+switch close
+    1 => out = 1
+    => out = 2
+    => out = 3
+out
+`,
+		},
+		{
+			name: "expression",
+			script: `
+value = switch close
+    1 => 1
+    => 2
+    => 3
+value
+`,
+		},
+	} {
+		_, err := e.Compile(tc.script)
+		if err == nil || !strings.Contains(err.Error(), "duplicate switch default arm") {
+			t.Fatalf("%s: expected duplicate switch default arm error, got %v", tc.name, err)
+		}
 	}
 }
 
@@ -409,6 +477,8 @@ func TestCompileRejectsNumericToBoolAutoConversion(t *testing.T) {
 		"bool b = true\nb := float(1)\nb",
 		"if 1\n    1\n1",
 		"var x = 1 ? 2 : 3\nx",
+		"bool b = switch close\n    1 => 1\n    => 2\nb",
+		"bool b = switch\n    close > 0 => 1\n    => 2\nb",
 		"var x = 1 and true\nx ? 1 : 0",
 	} {
 		_, err := e.Compile(script)
@@ -931,6 +1001,23 @@ myArr.noSuchMethod()
 	}
 	if !strings.Contains(err.Error(), "unknown method") {
 		t.Fatalf("expected unknown method error, got %v", err)
+	}
+}
+
+func TestNamedArgMethodCallWithUnknownReceiverReportsIdentifierError(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
+	b, err := e.Compile(`
+x.clear(start_column = 1)
+`)
+	if err != nil {
+		t.Fatalf("compile failed: %v", err)
+	}
+	_, err = e.Execute(b)
+	if err == nil || !strings.Contains(err.Error(), "unknown identifier: x") {
+		t.Fatalf("expected unknown identifier error, got %v", err)
 	}
 }
 

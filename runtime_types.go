@@ -218,5 +218,6 @@ var builtinCallParamSpecs = map[string]callParamSpec{
 	"input.source": {Names: []string{"defval", "title", "tooltip", "inline", "group", "display"}},
 	"input.string": {Names: []string{"defval", "title", "tooltip", "inline", "group", "display", "options", "confirm"}},
 	"table.cell":   {Names: []string{"table_id", "column", "row", "text", "width", "height", "text_color", "text_halign", "text_valign", "text_size", "bgcolor", "tooltip", "text_font_family"}},
+	"table.clear":  {Names: []string{"table_id", "start_column", "start_row", "end_column", "end_row"}, Required: 1},
 	"table.new":    {Names: []string{"position", "columns", "rows", "bgcolor", "frame_color", "frame_width", "border_color", "border_width"}, Required: 3},
 }

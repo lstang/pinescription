@@ -315,16 +315,20 @@ Pinescription provides string manipulation functions and placeholder types for c
 - `line.new` - Line object constructor placeholder
 - `label.new` - Label object constructor placeholder
 
-### No-Render UI Stubs
+### Drawing and UI Compatibility
 
-These functions are available for script compatibility but perform no actual rendering. They allow scripts to execute without producing visual output.
+Drawing and UI functions are available for script compatibility. Built-in fallbacks do not render by themselves, but host applications can register exact-name hooks to capture drawing objects and render them elsewhere. This is how applications can support TradingView-style drawing scripts while keeping rendering outside the core runtime.
 
 - `line.*` - Line drawing functions (stubs)
-- `label.*` - Label drawing functions (stubs)
-- `box.*` - Box drawing functions (stubs)
-- `table.*` - Table drawing functions (stubs)
+- `label.*` - Label drawing functions and deletion hooks
+- `box.*` - Box drawing functions and deletion hooks
+- `polyline.*` - Polyline drawing functions and deletion hooks
+- `chart.point.from_index` - Chart-point construction for drawing APIs
+- `table.*` - Table creation, cell, clear, and merge hooks
 - `linefill.*` - Line fill functions (stubs)
 - `barcolor` - Bar color function (stub)
+
+Hookable drawing calls can be overridden with `RegisterFunctionWithParamNames`, even when a compatibility stub exists. This is intentionally narrower than general built-in overriding: ordinary implemented built-ins such as `ta.rsi` remain protected, while supported drawing hook points such as `box.new`, `polyline.new`, `table.cell`, and `table.clear` may be registered by the host.
 
 ## Unsupported Features
 

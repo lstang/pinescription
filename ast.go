@@ -38,10 +38,11 @@ type TypeField struct {
 // FunctionDef describes a user-defined Pine Script function, including its name,
 // parameter names, body statements, and optionally a single-expression body.
 type FunctionDef struct {
-	Name   string   `json:"name"`
-	Params []string `json:"params"`
-	Body   []Stmt   `json:"body"`
-	Expr   *Expr    `json:"expr,omitempty"`
+	Name          string        `json:"name"`
+	Params        []string      `json:"params"`
+	ParamDefaults map[int]*Expr `json:"param_defaults,omitempty"`
+	Body          []Stmt        `json:"body"`
+	Expr          *Expr         `json:"expr,omitempty"`
 }
 
 // Stmt represents a single statement in the Pine Script AST. Kind is one of:
@@ -69,6 +70,7 @@ type Stmt struct {
 	From   *Expr  `json:"from,omitempty"`
 	To     *Expr  `json:"to,omitempty"`
 	By     *Expr  `json:"by,omitempty"`
+	ForIn  *Expr  `json:"for_in,omitempty"`
 
 	Func *FunctionDef `json:"func,omitempty"`
 	Type *TypeDef     `json:"type,omitempty"`
@@ -112,6 +114,10 @@ type Expr struct {
 
 	Args  []*Expr `json:"args,omitempty"`
 	Elems []*Expr `json:"elems,omitempty"`
+
+	SwitchExpr *Expr        `json:"switch_expr,omitempty"`
+	Cases      []SwitchCase `json:"cases,omitempty"`
+	Default    []Stmt       `json:"default,omitempty"`
 }
 
 // NamedArgValue returns the value expression for a "named_arg" expression node,

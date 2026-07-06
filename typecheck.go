@@ -57,6 +57,11 @@ func validateNoNumericToBoolAutoConversion(program *Program) error {
 		for _, p := range fn.Params {
 			fnEnv.set(p, staticTypeUnknown)
 		}
+		for _, defaultExpr := range fn.ParamDefaults {
+			if _, err := validateExprNoNumericToBool(defaultExpr, fnEnv); err != nil {
+				return fmt.Errorf("function %s: %w", fn.Name, err)
+			}
+		}
 		if fn.Expr != nil {
 			if _, err := validateExprNoNumericToBool(fn.Expr, fnEnv); err != nil {
 				return fmt.Errorf("function %s: %w", fn.Name, err)
@@ -140,6 +145,12 @@ func validateStmtNoNumericToBool(stmt Stmt, env *staticTypeEnv) error {
 		}
 		return validateStmtListNoNumericToBool(stmt.Body, env)
 	case "for":
+		if stmt.ForIn != nil {
+			if _, err := validateExprNoNumericToBool(stmt.ForIn, env); err != nil {
+				return err
+			}
+			return validateStmtListNoNumericToBool(stmt.Body, env)
+		}
 		if _, err := validateExprNoNumericToBool(stmt.From, env); err != nil {
 			return err
 		}
@@ -281,6 +292,44 @@ func validateExprNoNumericToBool(expr *Expr, env *staticTypeEnv) (staticExprType
 			return whenTrueType, nil
 		}
 		return staticTypeUnknown, nil
+	case "switch":
+		resultType := staticTypeUnknown
+		hasResultType := false
+		if expr.SwitchExpr != nil {
+			if _, err := validateExprNoNumericToBool(expr.SwitchExpr, env); err != nil {
+				return staticTypeUnknown, err
+			}
+			for _, c := range expr.Cases {
+				if _, err := validateExprNoNumericToBool(c.Match, env); err != nil {
+					return staticTypeUnknown, err
+				}
+				bodyType, err := validateSwitchExprBodyNoNumericToBool(c.Body, env)
+				if err != nil {
+					return staticTypeUnknown, err
+				}
+				resultType, hasResultType = mergeStaticExprTypes(resultType, hasResultType, bodyType)
+			}
+		} else {
+			for _, c := range expr.Cases {
+				if err := ensureBoolContextNoNumeric(c.Match, env, "switch condition"); err != nil {
+					return staticTypeUnknown, err
+				}
+				bodyType, err := validateSwitchExprBodyNoNumericToBool(c.Body, env)
+				if err != nil {
+					return staticTypeUnknown, err
+				}
+				resultType, hasResultType = mergeStaticExprTypes(resultType, hasResultType, bodyType)
+			}
+		}
+		defaultType, err := validateSwitchExprBodyNoNumericToBool(expr.Default, env)
+		if err != nil {
+			return staticTypeUnknown, err
+		}
+		resultType, hasResultType = mergeStaticExprTypes(resultType, hasResultType, defaultType)
+		if !hasResultType {
+			return staticTypeUnknown, nil
+		}
+		return resultType, nil
 	case "named_arg":
 		return validateExprNoNumericToBool(expr.NamedArgValue(), env)
 	case "call":
@@ -306,6 +355,30 @@ func validateExprNoNumericToBool(expr *Expr, env *staticTypeEnv) (staticExprType
 	default:
 		return staticTypeUnknown, nil
 	}
+}
+
+func validateSwitchExprBodyNoNumericToBool(body []Stmt, env *staticTypeEnv) (staticExprType, error) {
+	if len(body) != 1 {
+		return staticTypeUnknown, validateStmtListNoNumericToBool(body, env)
+	}
+	stmt := body[0]
+	if stmt.Kind != "expr" && stmt.Kind != "return" {
+		return staticTypeUnknown, validateStmtNoNumericToBool(stmt, env)
+	}
+	return validateExprNoNumericToBool(stmt.Expr, env)
+}
+
+func mergeStaticExprTypes(current staticExprType, hasCurrent bool, next staticExprType) (staticExprType, bool) {
+	if next == staticTypeUnknown || next == staticTypeNA {
+		return current, hasCurrent
+	}
+	if !hasCurrent {
+		return next, true
+	}
+	if current == next {
+		return current, true
+	}
+	return staticTypeUnknown, true
 }
 
 func staticTypeForIdentifier(name string, env *staticTypeEnv) staticExprType {

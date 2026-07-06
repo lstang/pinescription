@@ -25,6 +25,11 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 		}
 		return nil, fmt.Errorf("unsupported feature: %s", name)
 	}
+	if callHasNamedArgs(expr.Args) || strings.Contains(name, ".") {
+		if v, ok, err := r.callMethodWithNamedArgs(name, expr.Args); ok || err != nil {
+			return v, err
+		}
+	}
 	if callHasNamedArgs(expr.Args) {
 		if !r.hasCallParamSpec(name) {
 			if v, ok, err := r.callRegisteredFunction(name, expr.Args); ok || err != nil {
@@ -43,6 +48,12 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 	}
 	defer releaseArgs()
 
+	if isHookableDrawingFunctionName(name) {
+		if userFn, ok := r.userFns[name]; ok {
+			return r.invokeRegisteredFunction(userFn, args, useArgPool)
+		}
+	}
+
 	if expr.BID != builtinFastUnknown {
 		if v, ok, err := r.callBuiltinFast(expr.BID, rawArgs, args); ok || err != nil {
 			return v, err
@@ -59,7 +70,7 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 		}
 	}
 	if fn, ok := r.program.Functions[name]; ok {
-		result, err := r.callScriptFunction(fn, args)
+		result, err := r.callScriptFunction(fn, rawArgs, args)
 		return result, err
 	}
 	if userFn, ok := r.userFns[name]; ok {
@@ -78,12 +89,21 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 			methodArgs = append(methodArgs, recv)
 			methodArgs = append(methodArgs, args...)
 			if builtinName := methodBuiltinNameForReceiver(recv, methodName); builtinName != "" {
+				if isHookableDrawingFunctionName(builtinName) {
+					if userFn, ok := r.userFns[builtinName]; ok {
+						result, err := userFn(methodArgs...)
+						return result, err
+					}
+				}
 				if v, ok, err := r.callBuiltin(builtinName, nil, methodArgs); ok || err != nil {
 					return v, err
 				}
 			}
 			if fn, ok := r.program.Functions[methodName]; ok {
-				result, err := r.callScriptFunction(fn, methodArgs)
+				methodRawArgs := make([]*Expr, 0, len(rawArgs)+1)
+				methodRawArgs = append(methodRawArgs, nil)
+				methodRawArgs = append(methodRawArgs, rawArgs...)
+				result, err := r.callScriptFunction(fn, methodRawArgs, methodArgs)
 				return result, err
 			}
 			if userFn, ok := r.userFns[methodName]; ok {
@@ -96,11 +116,90 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 	return nil, fmt.Errorf("unknown function: %s", name)
 }
 
+func (r *Runtime) callMethodWithNamedArgs(name string, argExprs []*Expr) (interface{}, bool, error) {
+	recvName, methodName, ok := splitMethodCallName(name)
+	if !ok {
+		return nil, false, nil
+	}
+	recv, err := r.resolve(recvName)
+	if err != nil {
+		if !r.isKnownDottedCallName(name) {
+			return nil, true, err
+		}
+		return nil, false, nil
+	}
+	builtinName := methodBuiltinNameForReceiver(recv, methodName)
+	if builtinName == "" {
+		return nil, false, nil
+	}
+	spec, ok := r.callParamSpec(builtinName)
+	if !ok || len(spec.Names) == 0 {
+		return nil, false, nil
+	}
+	methodSpec := callParamSpec{Names: spec.Names[1:]}
+	boundRaw, err := bindNamedCallArgs(name, argExprs, methodSpec)
+	if err != nil {
+		return nil, true, err
+	}
+	args := make([]interface{}, 0, len(boundRaw)+1)
+	args = append(args, recv)
+	for _, rawArg := range boundRaw {
+		if rawArg == nil {
+			args = append(args, nil)
+			continue
+		}
+		v, err := r.eval(rawArg)
+		if err != nil {
+			return nil, true, err
+		}
+		args = append(args, v)
+	}
+	if isHookableDrawingFunctionName(builtinName) {
+		if userFn, ok := r.userFns[builtinName]; ok {
+			v, err := userFn(args...)
+			return v, true, err
+		}
+	}
+	if v, ok, err := r.callBuiltin(builtinName, nil, args); ok || err != nil {
+		return v, true, err
+	}
+	return nil, false, nil
+}
+
+func (r *Runtime) isKnownDottedCallName(name string) bool {
+	if !strings.Contains(name, ".") {
+		return false
+	}
+	if isHookableDrawingFunctionName(name) || isImplementedBuiltinFunctionName(name) || isUnsupportedFeatureCallName(name) {
+		return true
+	}
+	if r.hasCallParamSpec(name) {
+		return true
+	}
+	if _, ok := r.userFns[name]; ok {
+		return true
+	}
+	return false
+}
+
 func isUnsupportedFeatureCallName(name string) bool {
 	if name == "alert" || name == "alertcondition" {
 		return false
 	}
 	return strings.HasPrefix(name, "strategy.") || strings.HasPrefix(name, "request.") || strings.HasPrefix(name, "plot") || strings.HasPrefix(name, "alert")
+}
+
+func isHookableDrawingFunctionName(name string) bool {
+	switch name {
+	case "chart.point.from_index",
+		"polyline.new", "polyline.delete",
+		"box.new", "box.delete",
+		"label.new", "label.delete",
+		"table.new", "table.cell", "table.clear", "table.merge_cells":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Runtime) callRegisteredFunction(name string, argExprs []*Expr) (interface{}, bool, error) {
@@ -320,13 +419,21 @@ func splitTypeConstructorCallName(name string) (string, bool) {
 }
 
 func methodBuiltinNameForReceiver(receiver interface{}, method string) string {
-	switch receiver.(type) {
-	case []interface{}:
+	switch v := receiver.(type) {
+	case []interface{}, *pineArray:
 		return "array." + method
 	case *Matrix:
 		return "matrix." + method
 	case *pineMap:
 		return "map." + method
+	case map[string]interface{}:
+		if typ, ok := v["type"].(string); ok && typ != "" {
+			name := typ + "." + method
+			if isHookableDrawingFunctionName(name) || isImplementedBuiltinFunctionName(name) {
+				return name
+			}
+		}
+		return ""
 	case string:
 		return "str." + method
 	default:
@@ -357,7 +464,33 @@ func (r *Runtime) instantiateType(typeDef TypeDef, rawArgs []*Expr, args []inter
 	return instance, nil
 }
 
-func (r *Runtime) callScriptFunction(fn FunctionDef, args []interface{}) (interface{}, error) {
+type seriesArgument struct {
+	current interface{}
+	expr    *Expr
+}
+
+func wrapSeriesArgument(current interface{}, expr *Expr) interface{} {
+	if expr == nil {
+		return current
+	}
+	if _, ok := toFloat(current); ok {
+		return seriesArgument{current: current, expr: expr}
+	}
+	switch current.(type) {
+	case bool, string:
+		return seriesArgument{current: current, expr: expr}
+	}
+	return current
+}
+
+func unwrapSeriesArgument(v interface{}) interface{} {
+	if arg, ok := v.(seriesArgument); ok {
+		return arg.current
+	}
+	return v
+}
+
+func (r *Runtime) callScriptFunction(fn FunctionDef, rawArgs []*Expr, args []interface{}) (interface{}, error) {
 	useEnvPool := !disableEnvMapPooling
 	var env map[string]interface{}
 	if useEnvPool {
@@ -367,7 +500,11 @@ func (r *Runtime) callScriptFunction(fn FunctionDef, args []interface{}) (interf
 	}
 	for i, p := range fn.Params {
 		if i < len(args) {
-			env[p] = args[i]
+			var rawArg *Expr
+			if i < len(rawArgs) {
+				rawArg = rawArgs[i]
+			}
+			env[p] = wrapSeriesArgument(args[i], rawArg)
 		} else {
 			env[p] = nil
 		}
@@ -379,6 +516,20 @@ func (r *Runtime) callScriptFunction(fn FunctionDef, args []interface{}) (interf
 			releaseEnvMap(env)
 		}
 	}()
+	for i, p := range fn.Params {
+		if i < len(args) {
+			continue
+		}
+		defaultExpr := fn.ParamDefaults[i]
+		if defaultExpr == nil {
+			continue
+		}
+		v, err := r.eval(defaultExpr)
+		if err != nil {
+			return nil, err
+		}
+		env[p] = wrapSeriesArgument(v, defaultExpr)
+	}
 
 	if fn.Expr != nil {
 		return r.eval(fn.Expr)

@@ -10,6 +10,8 @@ import (
 	"math"
 )
 
+const maxLoopIterations = 100000
+
 func (r *Runtime) execTopLevel() error {
 	fl, err := r.execStmtList(r.program.Stmts)
 	if err != nil {
@@ -154,7 +156,12 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 	case "while":
 		var last interface{}
 		hasLast := false
+		iterations := 0
 		for {
+			if iterations >= maxLoopIterations {
+				return flow{}, fmt.Errorf("loop iteration limit exceeded: %d", maxLoopIterations)
+			}
+			iterations++
 			c, err := r.eval(stmt.Cond)
 			if err != nil {
 				return flow{}, err
@@ -182,6 +189,59 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 		}
 		return flow{kind: flowNone, value: last, hasValue: hasLast}, nil
 	case "for":
+		if stmt.ForIn != nil {
+			iterable, err := r.eval(stmt.ForIn)
+			if err != nil {
+				return flow{}, err
+			}
+			var items []interface{}
+			switch v := iterable.(type) {
+			case []interface{}:
+				items = v
+			case *pineArray:
+				items = v.items
+			default:
+				return flow{}, fmt.Errorf("for-in requires array iterable")
+			}
+			scope := r.envStack[len(r.envStack)-1]
+			if r.consts[stmt.ForVar] {
+				return flow{}, fmt.Errorf("cannot assign const variable %s", stmt.ForVar)
+			}
+			prevValue, hadPrev := scope[stmt.ForVar]
+			defer func() {
+				if hadPrev {
+					scope[stmt.ForVar] = prevValue
+				} else {
+					delete(scope, stmt.ForVar)
+				}
+			}()
+			var last interface{}
+			hasLast := false
+			for idx, item := range items {
+				if idx >= maxLoopIterations {
+					return flow{}, fmt.Errorf("loop iteration limit exceeded: %d", maxLoopIterations)
+				}
+				scope[stmt.ForVar] = item
+				fl, err := r.execStmtList(stmt.Body)
+				if err != nil {
+					return flow{}, err
+				}
+				switch fl.kind {
+				case flowNone:
+					if fl.hasValue {
+						last = fl.value
+						hasLast = true
+					}
+				case flowBreak:
+					return flow{kind: flowNone, value: last, hasValue: hasLast}, nil
+				case flowContinue:
+					continue
+				default:
+					return fl, nil
+				}
+			}
+			return flow{kind: flowNone, value: last, hasValue: hasLast}, nil
+		}
 		fromV, err := r.eval(stmt.From)
 		if err != nil {
 			return flow{}, err
@@ -212,7 +272,12 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 				}
 				return i >= to
 			}
+			iterations := 0
 			for i := from; cmp(i); i += step {
+				if iterations >= maxLoopIterations {
+					return flow{}, fmt.Errorf("loop iteration limit exceeded: %d", maxLoopIterations)
+				}
+				iterations++
 				_ = r.assign(stmt.ForVar, i, false, false)
 				fl, err := r.execStmtList(stmt.Body)
 				if err != nil {
@@ -260,7 +325,12 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 			}
 			return i >= to
 		}
+		iterations := 0
 		for i := from; cmp(i); i += step {
+			if iterations >= maxLoopIterations {
+				return flow{}, fmt.Errorf("loop iteration limit exceeded: %d", maxLoopIterations)
+			}
+			iterations++
 			r.loopBindings[len(r.loopBindings)-1].value = i
 			fl, err := r.execStmtList(stmt.Body)
 			if err != nil {
@@ -523,9 +593,23 @@ func (r *Runtime) eval(expr *Expr) (interface{}, error) {
 			return high, nil
 		}
 		return x, nil
+	case exprKindSwitch:
+		return r.evalSwitchExpr(expr)
 	default:
 		return nil, fmt.Errorf("unsupported expression opcode")
 	}
+}
+
+func (r *Runtime) evalSwitchExpr(expr *Expr) (interface{}, error) {
+	stmt := Stmt{Kind: "switch", SwitchExpr: expr.SwitchExpr, Cases: expr.Cases, Default: expr.Default}
+	fl, err := r.execSwitch(stmt)
+	if err != nil {
+		return nil, err
+	}
+	if fl.hasValue || fl.kind == flowReturn {
+		return fl.value, nil
+	}
+	return nil, nil
 }
 
 func (r *Runtime) evalWithOffset(expr *Expr, offset int) (interface{}, error) {
@@ -550,6 +634,11 @@ func (r *Runtime) evalIndex(left *Expr, idx int) (interface{}, error) {
 		name := left.Name
 		if idx == 0 {
 			return r.resolve(name)
+		}
+		if raw, ok := r.lookupAssignedValue(name); ok {
+			if arg, ok := raw.(seriesArgument); ok && arg.expr != nil {
+				return r.evalWithOffset(arg.expr, idx)
+			}
 		}
 		if isPriceIdentifierName(name) {
 			return r.valueAt(r.activeSymbol, name, r.evalOffset+idx), nil

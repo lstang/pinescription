@@ -191,7 +191,7 @@ func (r *Runtime) resolve(name string) (interface{}, error) {
 	}
 	if r.evalOffset == 0 && len(r.envStack) == 1 && !isSpecialIdentifierName(name) {
 		if v, ok := r.envStack[0][name]; ok {
-			return v, nil
+			return unwrapSeriesArgument(v), nil
 		}
 	}
 	switch r.classifyIdentifier(name) {
@@ -227,12 +227,12 @@ func (r *Runtime) resolve(name string) (interface{}, error) {
 	if r.evalOffset == 0 {
 		if len(r.envStack) == 1 {
 			if v, ok := r.envStack[0][name]; ok {
-				return v, nil
+				return unwrapSeriesArgument(v), nil
 			}
 		} else {
 			for i := len(r.envStack) - 1; i >= 0; i-- {
 				if v, ok := r.envStack[i][name]; ok {
-					return v, nil
+					return unwrapSeriesArgument(v), nil
 				}
 			}
 		}
@@ -263,12 +263,12 @@ func (r *Runtime) resolve(name string) (interface{}, error) {
 	if r.evalOffset == 0 {
 		if len(r.envStack) == 1 {
 			if v, ok := r.envStack[0][name]; ok {
-				return v, nil
+				return unwrapSeriesArgument(v), nil
 			}
 		} else {
 			for i := len(r.envStack) - 1; i >= 0; i-- {
 				if v, ok := r.envStack[i][name]; ok {
-					return v, nil
+					return unwrapSeriesArgument(v), nil
 				}
 			}
 		}

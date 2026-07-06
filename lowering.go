@@ -31,6 +31,9 @@ func lowerFunctionDef(fn *FunctionDef) {
 		lowerStmt(&fn.Body[i])
 	}
 	lowerExpr(fn.Expr)
+	for i := range fn.ParamDefaults {
+		lowerExpr(fn.ParamDefaults[i])
+	}
 }
 
 func lowerStmt(stmt *Stmt) {
@@ -43,6 +46,7 @@ func lowerStmt(stmt *Stmt) {
 	lowerExpr(stmt.From)
 	lowerExpr(stmt.To)
 	lowerExpr(stmt.By)
+	lowerExpr(stmt.ForIn)
 	lowerExpr(stmt.SwitchExpr)
 
 	for i := range stmt.Then {
@@ -84,6 +88,16 @@ func lowerExpr(expr *Expr) {
 	}
 	for i := range expr.Elems {
 		lowerExpr(expr.Elems[i])
+	}
+	lowerExpr(expr.SwitchExpr)
+	for i := range expr.Default {
+		lowerStmt(&expr.Default[i])
+	}
+	for i := range expr.Cases {
+		lowerExpr(expr.Cases[i].Match)
+		for j := range expr.Cases[i].Body {
+			lowerStmt(&expr.Cases[i].Body[j])
+		}
 	}
 
 	switch expr.Kind {

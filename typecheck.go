@@ -57,6 +57,11 @@ func validateNoNumericToBoolAutoConversion(program *Program) error {
 		for _, p := range fn.Params {
 			fnEnv.set(p, staticTypeUnknown)
 		}
+		for _, defaultExpr := range fn.ParamDefaults {
+			if _, err := validateExprNoNumericToBool(defaultExpr, fnEnv); err != nil {
+				return fmt.Errorf("function %s: %w", fn.Name, err)
+			}
+		}
 		if fn.Expr != nil {
 			if _, err := validateExprNoNumericToBool(fn.Expr, fnEnv); err != nil {
 				return fmt.Errorf("function %s: %w", fn.Name, err)
@@ -140,6 +145,12 @@ func validateStmtNoNumericToBool(stmt Stmt, env *staticTypeEnv) error {
 		}
 		return validateStmtListNoNumericToBool(stmt.Body, env)
 	case "for":
+		if stmt.ForIn != nil {
+			if _, err := validateExprNoNumericToBool(stmt.ForIn, env); err != nil {
+				return err
+			}
+			return validateStmtListNoNumericToBool(stmt.Body, env)
+		}
 		if _, err := validateExprNoNumericToBool(stmt.From, env); err != nil {
 			return err
 		}
@@ -279,6 +290,33 @@ func validateExprNoNumericToBool(expr *Expr, env *staticTypeEnv) (staticExprType
 		}
 		if whenTrueType == whenFalseType {
 			return whenTrueType, nil
+		}
+		return staticTypeUnknown, nil
+	case "switch":
+		if expr.SwitchExpr != nil {
+			if _, err := validateExprNoNumericToBool(expr.SwitchExpr, env); err != nil {
+				return staticTypeUnknown, err
+			}
+			for _, c := range expr.Cases {
+				if _, err := validateExprNoNumericToBool(c.Match, env); err != nil {
+					return staticTypeUnknown, err
+				}
+				if err := validateStmtListNoNumericToBool(c.Body, env); err != nil {
+					return staticTypeUnknown, err
+				}
+			}
+		} else {
+			for _, c := range expr.Cases {
+				if err := ensureBoolContextNoNumeric(c.Match, env, "switch condition"); err != nil {
+					return staticTypeUnknown, err
+				}
+				if err := validateStmtListNoNumericToBool(c.Body, env); err != nil {
+					return staticTypeUnknown, err
+				}
+			}
+		}
+		if err := validateStmtListNoNumericToBool(expr.Default, env); err != nil {
+			return staticTypeUnknown, err
 		}
 		return staticTypeUnknown, nil
 	case "named_arg":

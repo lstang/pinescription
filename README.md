@@ -155,7 +155,9 @@ Common series keys include `AAPL|close`, `AAPL|volume`, etc.
 - Request APIs (`request.security`, `request.financial`...)
 - Plot APIs (`plot`, `plotshape`...)
 
-These return explicit runtime errors when used unless you register an exact-name custom function hook. Use `RegisterFunction("strategy.order", fn)` for positional-only hooks, or `RegisterFunctionWithParamNames(...)` when the Pine call may use named arguments, for example `RegisterFunctionWithParamNames("plot", []string{"series", "title", "color"}, fn)` or `RegisterFunctionWithParamNames("request.security", []string{"symbol", "timeframe", "expression"}, fn)`. Hook names must be unsupported feature call names; validation still rejects parser-reserved names, implemented built-ins, and Pine type keywords such as `int`, `float`, `color`, and `table`.
+These return explicit runtime errors when used unless you register an exact-name custom function hook. Use `RegisterFunction("strategy.order", fn)` for positional-only hooks, or `RegisterFunctionWithParamNames(...)` when the Pine call may use named arguments, for example `RegisterFunctionWithParamNames("plot", []string{"series", "title", "color"}, fn)` or `RegisterFunctionWithParamNames("request.security", []string{"symbol", "timeframe", "expression"}, fn)`. Validation still rejects parser-reserved names, non-hookable implemented built-ins, and Pine type keywords such as `int`, `float`, `color`, and `table`.
+
+Host applications may also register selected drawing-object hook points such as `polyline.new`, `box.new`, `label.new`, `chart.point.from_index`, `table.cell`, and `table.clear`. Pinescription provides compatibility stubs for those APIs, but a host hook can capture the calls and render the resulting objects outside the runtime.
 
 ---
 

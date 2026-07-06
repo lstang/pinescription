@@ -17,7 +17,7 @@ import (
 	series "github.com/woodstock-tokyo/pinescription/series"
 )
 
-var arrayNewGenericRe = regexp.MustCompile(`array\.new\s*<\s*(int|float|bool|string)\s*>`)
+var arrayNewGenericRe = regexp.MustCompile(`array\.new\s*<\s*(int|float|bool|string|box|label|polyline|chart\.point)\s*>`)
 
 func normalizePineScriptCompat(source string) string {
 	return arrayNewGenericRe.ReplaceAllStringFunc(source, func(m string) string {
@@ -25,8 +25,15 @@ func normalizePineScriptCompat(source string) string {
 		if len(parts) != 2 {
 			return m
 		}
-		return "array.new_" + strings.ToLower(parts[1])
+		typeName := strings.ReplaceAll(strings.ToLower(parts[1]), ".", "_")
+		return "array.new_" + typeName
 	})
+}
+
+// ArrayValue exposes Pine array contents to host-registered functions without
+// exporting the runtime's mutable array implementation.
+type ArrayValue interface {
+	PineArrayItems() []interface{}
 }
 
 // SeriesExtended is an alias for the series extension interface defined in the
@@ -211,7 +218,7 @@ func validateRegisteredFunctionName(name string) error {
 	if isReservedPineKeyword(name) || (isTypeKeyword(name) && !isUnsupportedFeatureCallName(name)) {
 		return fmt.Errorf("registered function name %q is reserved", name)
 	}
-	if isImplementedBuiltinFunctionName(name) {
+	if isImplementedBuiltinFunctionName(name) && !isHookableDrawingFunctionName(name) {
 		return fmt.Errorf("registered function name %q conflicts with a built-in function", name)
 	}
 	return nil
@@ -240,13 +247,14 @@ func isImplementedBuiltinFunctionName(name string) bool {
 var implementedBuiltinFunctionNames = map[string]struct{}{
 	"int": {}, "float": {}, "bool": {}, "string": {}, "str.tostring": {},
 	"input.time": {}, "input.session": {}, "input.symbol": {},
-	"alertcondition": {}, "color": {}, "color.rgb": {},
+	"alertcondition": {}, "color": {}, "color.rgb": {}, "color.from_gradient": {},
 	"box.get_bottom": {}, "box.get_top": {}, "box.set_right": {}, "box.delete": {},
-	"linefill.new": {}, "line.new": {}, "label.new": {}, "line.set_xy1": {}, "line.set_xy2": {}, "line.set_color": {},
+	"linefill.new": {}, "line.new": {}, "label.new": {}, "label.delete": {}, "polyline.new": {}, "polyline.delete": {}, "chart.point.from_index": {}, "line.set_xy1": {}, "line.set_xy2": {}, "line.set_color": {},
 	"label.set_xy": {}, "label.set_text": {}, "label.set_tooltip": {},
+	"table.clear": {}, "table.merge_cells": {},
 	"log.info": {}, "log.warning": {}, "log.error": {},
 	"map.new": {}, "map.clear": {}, "map.copy": {}, "map.size": {}, "map.put": {}, "map.get": {}, "map.contains": {}, "map.remove": {}, "map.keys": {}, "map.values": {},
-	"array.new_int": {}, "array.new_float": {}, "array.new_bool": {}, "array.new_string": {}, "array.new_box": {},
+	"array.new_int": {}, "array.new_float": {}, "array.new_bool": {}, "array.new_string": {}, "array.new_box": {}, "array.new_label": {}, "array.new_polyline": {}, "array.new_chart_point": {},
 	"array.size": {}, "array.get": {}, "array.set": {}, "array.push": {}, "array.pop": {}, "array.unshift": {}, "array.shift": {}, "array.clear": {}, "array.remove": {}, "array.concat": {}, "array.slice": {}, "array.includes": {}, "array.indexof": {}, "array.lastindexof": {}, "array.copy": {}, "array.from": {}, "array.insert": {}, "array.first": {}, "array.last": {}, "array.join": {}, "array.every": {}, "array.abs": {}, "array.sum": {}, "array.avg": {}, "array.max": {}, "array.min": {}, "array.range": {}, "array.median": {}, "array.mode": {}, "array.percentrank": {}, "array.percentile_linear_interpolation": {}, "array.percentile_nearest_rank": {}, "array.percentile_neareast_rank": {}, "array.binary_search_leftmost": {}, "array.binary_search_rightmost": {}, "array.covariance": {},
 	"str.length": {}, "str.upper": {}, "str.lower": {}, "str.contains": {}, "str.startswith": {}, "str.endswith": {}, "str.replace": {}, "str.substring": {}, "str.split": {}, "str.format": {},
 	"na": {}, "fixnan": {},

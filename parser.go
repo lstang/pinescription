@@ -163,14 +163,14 @@ func (p *parser) parseFunction(requireKeyword bool) (Stmt, error) {
 			if err != nil {
 				return Stmt{}, err
 			}
-			fn := &FunctionDef{Name: nameTok.Text, Params: params, Body: body}
+			fn := &FunctionDef{Name: nameTok.Text, Params: params.names, ParamDefaults: params.defaults, Body: body}
 			return Stmt{Kind: "function", Func: fn}, nil
 		}
 		expr, err := p.parseExpr(0)
 		if err != nil {
 			return Stmt{}, err
 		}
-		fn := &FunctionDef{Name: nameTok.Text, Params: params, Expr: expr}
+		fn := &FunctionDef{Name: nameTok.Text, Params: params.names, ParamDefaults: params.defaults, Expr: expr}
 		return Stmt{Kind: "function", Func: fn}, nil
 	}
 
@@ -181,7 +181,7 @@ func (p *parser) parseFunction(requireKeyword bool) (Stmt, error) {
 	if err != nil {
 		return Stmt{}, err
 	}
-	fn := &FunctionDef{Name: nameTok.Text, Params: params, Body: body}
+	fn := &FunctionDef{Name: nameTok.Text, Params: params.names, ParamDefaults: params.defaults, Body: body}
 	return Stmt{Kind: "function", Func: fn}, nil
 }
 
@@ -210,7 +210,7 @@ func (p *parser) tryParseArrowFunction() (Stmt, error) {
 		if err != nil {
 			return Stmt{}, err
 		}
-		fn := &FunctionDef{Name: nameTok.Text, Params: params, Body: body}
+		fn := &FunctionDef{Name: nameTok.Text, Params: params.names, ParamDefaults: params.defaults, Body: body}
 		return Stmt{Kind: "function", Func: fn}, nil
 	}
 
@@ -218,7 +218,7 @@ func (p *parser) tryParseArrowFunction() (Stmt, error) {
 	if err != nil {
 		return Stmt{}, err
 	}
-	fn := &FunctionDef{Name: nameTok.Text, Params: params, Expr: expr}
+	fn := &FunctionDef{Name: nameTok.Text, Params: params.names, ParamDefaults: params.defaults, Expr: expr}
 	return Stmt{Kind: "function", Func: fn}, nil
 }
 
@@ -247,14 +247,20 @@ func (p *parser) arrowFollowsParenGroup() bool {
 func (p *parser) parseDecl() (Stmt, error) {
 	k := p.next().Text
 	stmt := Stmt{Kind: "decl", Const: k == "const"}
-	if p.match(tokIdent) && isTypeKeyword(p.peek().Text) && p.lookAhead(1).Typ == tokIdent {
-		stmt.TypeName = p.next().Text
-		nameTok, err := p.expect(tokIdent)
-		if err != nil {
-			return Stmt{}, err
+	save := p.pos
+	if p.match(tokIdent) {
+		if typeName, err := p.consumeTypeAnnotation(); err == nil && p.match(tokIdent) {
+			stmt.TypeName = typeName
+			nameTok, err := p.expect(tokIdent)
+			if err != nil {
+				return Stmt{}, err
+			}
+			stmt.Name = nameTok.Text
+		} else {
+			p.pos = save
 		}
-		stmt.Name = nameTok.Text
-	} else {
+	}
+	if stmt.Name == "" {
 		nameTok, err := p.expect(tokIdent)
 		if err != nil {
 			return Stmt{}, err
@@ -435,6 +441,21 @@ func (p *parser) parseFor() (Stmt, error) {
 	if err != nil {
 		return Stmt{}, err
 	}
+	if p.matchIdent("in") {
+		p.next()
+		iterable, err := p.parseExpr(0)
+		if err != nil {
+			return Stmt{}, err
+		}
+		if err := p.expectNewlineAndIndent(); err != nil {
+			return Stmt{}, err
+		}
+		body, err := p.parseBlock()
+		if err != nil {
+			return Stmt{}, err
+		}
+		return Stmt{Kind: "for", ForVar: nameTok.Text, ForIn: iterable, Body: body}, nil
+	}
 	if _, err := p.expect(tokAssign); err != nil {
 		return Stmt{}, err
 	}
@@ -579,23 +600,48 @@ func (p *parser) parseBlock() ([]Stmt, error) {
 	return out, nil
 }
 
-func (p *parser) parseParams() ([]string, error) {
+type parsedParams struct {
+	names    []string
+	defaults map[int]*Expr
+}
+
+func (p *parser) parseParams() (parsedParams, error) {
 	if _, err := p.expect(tokLParen); err != nil {
-		return nil, err
+		return parsedParams{}, err
 	}
-	var params []string
+	var params parsedParams
 	for !p.match(tokRParen) {
+		for p.match(tokIdent) {
+			kw := p.peek().Text
+			if kw != "simple" && kw != "series" && kw != "input" {
+				break
+			}
+			p.next()
+		}
 		if p.match(tokIdent) && (isTypeKeyword(p.peek().Text) || p.lookAhead(1).Typ == tokIdent || p.lookAhead(1).Typ == tokLt) {
 			if _, err := p.consumeTypeAnnotation(); err != nil {
-				return nil, err
+				return parsedParams{}, err
 			}
 		}
 		nameTok, err := p.expect(tokIdent)
 		if err != nil {
-			return nil, err
+			return parsedParams{}, err
 		}
 		name := nameTok.Text
-		params = append(params, name)
+		params.names = append(params.names, name)
+		paramIndex := len(params.names) - 1
+		var defaultExpr *Expr
+		if p.match(tokAssign) {
+			p.next()
+			defaultExpr, err = p.parseExpr(0)
+			if err != nil {
+				return parsedParams{}, err
+			}
+			if params.defaults == nil {
+				params.defaults = map[int]*Expr{}
+			}
+			params.defaults[paramIndex] = defaultExpr
+		}
 		if p.match(tokComma) {
 			p.next()
 			continue
@@ -683,6 +729,8 @@ func (p *parser) parsePrefix() (*Expr, error) {
 	if t.Typ == tokIdent {
 		p.next()
 		switch t.Text {
+		case "switch":
+			return p.parseSwitchExpr()
 		case "true":
 			return &Expr{Kind: "bool", Bool: true}, nil
 		case "false":
@@ -785,6 +833,57 @@ func (p *parser) parsePrefix() (*Expr, error) {
 	return nil, fmt.Errorf("line %d col %d: unexpected token %q", t.Line, t.Col, t.Text)
 }
 
+func (p *parser) parseSwitchExpr() (*Expr, error) {
+	expr := &Expr{Kind: "switch"}
+	if !p.match(tokNewline) {
+		switchExpr, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		expr.SwitchExpr = switchExpr
+	}
+	if err := p.expectNewlineAndIndent(); err != nil {
+		return nil, err
+	}
+
+	for !p.match(tokDedent) && !p.match(tokEOF) {
+		p.skipNewlines()
+		if p.match(tokDedent) || p.match(tokEOF) {
+			break
+		}
+
+		if p.match(tokArrow) {
+			p.next()
+			value, err := p.parseExpr(0)
+			if err != nil {
+				return nil, err
+			}
+			expr.Default = []Stmt{{Kind: "expr", Expr: value}}
+			p.skipNewlines()
+			continue
+		}
+
+		matchExpr, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(tokArrow); err != nil {
+			return nil, err
+		}
+		value, err := p.parseExpr(0)
+		if err != nil {
+			return nil, err
+		}
+		expr.Cases = append(expr.Cases, SwitchCase{Match: matchExpr, Body: []Stmt{{Kind: "expr", Expr: value}}})
+		p.skipNewlines()
+	}
+
+	if _, err := p.expect(tokDedent); err != nil {
+		return nil, err
+	}
+	return expr, nil
+}
+
 func (p *parser) parseArgs() ([]*Expr, error) {
 	if _, err := p.expect(tokLParen); err != nil {
 		return nil, err
@@ -866,7 +965,7 @@ func (p *parser) tryParseTupleAssign() (Stmt, bool, error) {
 
 func isTypeKeyword(name string) bool {
 	switch name {
-	case "int", "float", "bool", "string", "array", "matrix", "map", "plot", "hline", "color", "line", "label", "box", "table", "linefill":
+	case "int", "float", "bool", "string", "array", "matrix", "map", "plot", "hline", "color", "line", "label", "box", "table", "linefill", "polyline", "chart.point":
 		return true
 	default:
 		return false

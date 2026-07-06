@@ -20,6 +20,7 @@ const (
 	exprKindCall
 	exprKindNamedArg
 	exprKindCiscClamp
+	exprKindSwitch
 )
 
 const (
@@ -99,6 +100,8 @@ func exprKindOpcodeFromString(kind string) uint8 {
 		return exprKindNamedArg
 	case "cisc_clamp":
 		return exprKindCiscClamp
+	case "switch":
+		return exprKindSwitch
 	default:
 		return exprKindUnknown
 	}

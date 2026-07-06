@@ -314,6 +314,44 @@ out
 	}
 }
 
+func TestSwitchRejectsDuplicateDefaultArms(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
+	for _, tc := range []struct {
+		name   string
+		script string
+	}{
+		{
+			name: "statement",
+			script: `
+var out = 0
+switch close
+    1 => out = 1
+    => out = 2
+    => out = 3
+out
+`,
+		},
+		{
+			name: "expression",
+			script: `
+value = switch close
+    1 => 1
+    => 2
+    => 3
+value
+`,
+		},
+	} {
+		_, err := e.Compile(tc.script)
+		if err == nil || !strings.Contains(err.Error(), "duplicate switch default arm") {
+			t.Fatalf("%s: expected duplicate switch default arm error, got %v", tc.name, err)
+		}
+	}
+}
+
 func TestFunctionsArraysTuplesAndCasts(t *testing.T) {
 	script := `
 sum2(a, b) => a + b

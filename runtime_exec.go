@@ -199,6 +199,9 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 				return flow{}, fmt.Errorf("for-in requires array iterable")
 			}
 			scope := r.envStack[len(r.envStack)-1]
+			if r.consts[stmt.ForVar] {
+				return flow{}, fmt.Errorf("cannot assign const variable %s", stmt.ForVar)
+			}
 			prevValue, hadPrev := scope[stmt.ForVar]
 			defer func() {
 				if hadPrev {

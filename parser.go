@@ -509,6 +509,10 @@ func (p *parser) parseSwitch() (Stmt, error) {
 		}
 
 		if p.match(tokArrow) {
+			if len(stmt.Default) > 0 {
+				t := p.peek()
+				return Stmt{}, fmt.Errorf("line %d col %d: duplicate switch default arm", t.Line, t.Col)
+			}
 			p.next()
 			action, err := p.parseSwitchCaseAction()
 			if err != nil {
@@ -853,6 +857,10 @@ func (p *parser) parseSwitchExpr() (*Expr, error) {
 		}
 
 		if p.match(tokArrow) {
+			if len(expr.Default) > 0 {
+				t := p.peek()
+				return nil, fmt.Errorf("line %d col %d: duplicate switch default arm", t.Line, t.Col)
+			}
 			p.next()
 			value, err := p.parseExpr(0)
 			if err != nil {

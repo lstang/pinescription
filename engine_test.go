@@ -458,6 +458,8 @@ func TestCompileRejectsNumericToBoolAutoConversion(t *testing.T) {
 		"bool b = true\nb := float(1)\nb",
 		"if 1\n    1\n1",
 		"var x = 1 ? 2 : 3\nx",
+		"bool b = switch close\n    1 => 1\n    => 2\nb",
+		"bool b = switch\n    close > 0 => 1\n    => 2\nb",
 		"var x = 1 and true\nx ? 1 : 0",
 	} {
 		_, err := e.Compile(script)

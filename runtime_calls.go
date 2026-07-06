@@ -454,10 +454,14 @@ func wrapSeriesArgument(current interface{}, expr *Expr) interface{} {
 	if expr == nil {
 		return current
 	}
-	if _, ok := toFloat(current); !ok {
-		return current
+	if _, ok := toFloat(current); ok {
+		return seriesArgument{current: current, expr: expr}
 	}
-	return seriesArgument{current: current, expr: expr}
+	switch current.(type) {
+	case bool, string:
+		return seriesArgument{current: current, expr: expr}
+	}
+	return current
 }
 
 func unwrapSeriesArgument(v interface{}) interface{} {

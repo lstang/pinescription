@@ -437,6 +437,39 @@ func (p *parser) parseWhile() (Stmt, error) {
 
 func (p *parser) parseFor() (Stmt, error) {
 	_, _ = p.expectIdent("for")
+	// v5 tuple form: "for [index, value] in array"
+	if p.match(tokLBrack) {
+		p.next()
+		n1, err := p.expect(tokIdent)
+		if err != nil {
+			return Stmt{}, err
+		}
+		if _, err := p.expect(tokComma); err != nil {
+			return Stmt{}, err
+		}
+		n2, err := p.expect(tokIdent)
+		if err != nil {
+			return Stmt{}, err
+		}
+		if _, err := p.expect(tokRBrack); err != nil {
+			return Stmt{}, err
+		}
+		if _, err := p.expectIdent("in"); err != nil {
+			return Stmt{}, err
+		}
+		iterable, err := p.parseExpr(0)
+		if err != nil {
+			return Stmt{}, err
+		}
+		if err := p.expectNewlineAndIndent(); err != nil {
+			return Stmt{}, err
+		}
+		body, err := p.parseBlock()
+		if err != nil {
+			return Stmt{}, err
+		}
+		return Stmt{Kind: "for", ForVar: n1.Text, ForVar2: n2.Text, ForTuple: true, ForIn: iterable, Body: body}, nil
+	}
 	nameTok, err := p.expect(tokIdent)
 	if err != nil {
 		return Stmt{}, err
@@ -546,7 +579,18 @@ func (p *parser) parseSwitch() (Stmt, error) {
 
 func (p *parser) parseSwitchCaseAction() (Stmt, error) {
 	if p.match(tokNewline) {
-		return Stmt{}, fmt.Errorf("switch case action must be inline")
+		// Multi-statement (block) case action:
+		//     "Close" =>
+		//         strategy.entry("L")
+		//         x := 1
+		if err := p.expectNewlineAndIndent(); err != nil {
+			return Stmt{}, err
+		}
+		body, err := p.parseBlock()
+		if err != nil {
+			return Stmt{}, err
+		}
+		return Stmt{Kind: "block", Body: body}, nil
 	}
 
 	t := p.peek()
@@ -618,6 +662,12 @@ func (p *parser) parseParams() (parsedParams, error) {
 		for p.match(tokIdent) {
 			kw := p.peek().Text
 			if kw != "simple" && kw != "series" && kw != "input" {
+				break
+			}
+			// Only treat simple/series/input as qualifiers when a parameter
+			// name still follows; a lone "series" is the parameter's name
+			// itself (e.g. DEMA(series, length) => ...).
+			if p.lookAhead(1).Typ != tokIdent {
 				break
 			}
 			p.next()
@@ -862,6 +912,22 @@ func (p *parser) parseSwitchExpr() (*Expr, error) {
 				return nil, fmt.Errorf("line %d col %d: duplicate switch default arm", t.Line, t.Col)
 			}
 			p.next()
+			if p.match(tokNewline) {
+				// Block-form default arm:
+				//     =>
+				//         runtime.error("...")
+				//         na
+				if err := p.expectNewlineAndIndent(); err != nil {
+					return nil, err
+				}
+				body, err := p.parseBlock()
+				if err != nil {
+					return nil, err
+				}
+				expr.Default = body
+				p.skipNewlines()
+				continue
+			}
 			value, err := p.parseExpr(0)
 			if err != nil {
 				return nil, err
@@ -877,6 +943,22 @@ func (p *parser) parseSwitchExpr() (*Expr, error) {
 		}
 		if _, err := p.expect(tokArrow); err != nil {
 			return nil, err
+		}
+		if p.match(tokNewline) {
+			// Block-form case arm:
+			//     "SSMA" =>
+			//         a1 = math.exp(...)
+			//         ...
+			if err := p.expectNewlineAndIndent(); err != nil {
+				return nil, err
+			}
+			body, err := p.parseBlock()
+			if err != nil {
+				return nil, err
+			}
+			expr.Cases = append(expr.Cases, SwitchCase{Match: matchExpr, Body: body})
+			p.skipNewlines()
+			continue
 		}
 		value, err := p.parseExpr(0)
 		if err != nil {

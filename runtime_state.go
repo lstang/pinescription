@@ -223,6 +223,9 @@ func (r *Runtime) resolve(name string) (interface{}, error) {
 		if v, ok, err := r.resolveDottedIdentifier(name); ok || err != nil {
 			return v, err
 		}
+		if v, ok := namespaceConstantValue(name); ok {
+			return v, nil
+		}
 	}
 	if r.evalOffset == 0 {
 		if len(r.envStack) == 1 {
@@ -362,9 +365,10 @@ func (r *Runtime) assign(name string, v interface{}, isConst bool, mustExist boo
 	}
 	if r.declaredTypes != nil && r.declaredTypes[name] == "bool" {
 		if isNA(v) {
-			return fmt.Errorf("bool value cannot be na")
-		}
-		if vb, ok := v.(bool); ok {
+			// Scripts legitimately assign na to bool-declared vars in
+			// default-init blocks; coerce to false instead of failing.
+			v = false
+		} else if vb, ok := v.(bool); ok {
 			v = vb
 		} else {
 			return fmt.Errorf("bool value must be bool")
@@ -530,6 +534,39 @@ func objectFieldSet(obj interface{}, field string, value interface{}) (bool, err
 	default:
 		return false, nil
 	}
+}
+
+// namespaceConstantValue resolves built-in dotted namespace constants that
+// have no runtime state (currency.*, order.*). Anything not listed returns
+// ok=false so the caller can fall through to the normal error path.
+func namespaceConstantValue(name string) (interface{}, bool) {
+	switch name {
+	case "currency.NONE", "currency.USD", "currency.USDT", "currency.EUR",
+		"currency.GBP", "currency.JPY", "currency.KRW", "currency.CNY",
+		"currency.HKD", "currency.SGD", "currency.TWD", "currency.AUD",
+		"currency.BTC", "currency.ETH", "currency.INR", "currency.MYR",
+		"currency.IDR", "currency.RUB", "currency.TRY", "currency.BRL",
+		"currency.CHF", "currency.CAD", "currency.NZD", "currency.SEK",
+		"currency.NOK", "currency.DKK", "currency.PLN", "currency.CZK",
+		"currency.HUF", "currency.RON", "currency.BGN", "currency.HRK",
+		"currency.ISK", "currency.UAH", "currency.ZAR", "currency.MXN",
+		"currency.ARS", "currency.CLK", "currency.COP", "currency.PEN",
+		"currency.ILS", "currency.AED", "currency.SAR", "currency.QAR",
+		"currency.KWD", "currency.BHD", "currency.OMR", "currency.JOD",
+		"currency.EGP", "currency.NGN", "currency.KES", "currency.GHS",
+		"currency.MAD", "currency.DZD", "currency.TND", "currency.PKR",
+		"currency.BDT", "currency.LKR", "currency.NPR", "currency.MMK",
+		"currency.THK", "currency.THB", "currency.VND", "currency.PHP":
+		return name, true
+	case "order.ascending", "order.ascendingleft", "order.descending", "order.descendingleft":
+		// order.ascending = 0, order.descending = 1 (others unused by the
+		// sorting builtins implemented here).
+		if strings.Contains(name, "descending") {
+			return 1.0, true
+		}
+		return 0.0, true
+	}
+	return nil, false
 }
 
 func (r *Runtime) resolveDottedIdentifier(name string) (interface{}, bool, error) {
@@ -783,16 +820,64 @@ func (r *Runtime) timeIdentifierValue(name string) (interface{}, bool) {
 	}
 }
 
+// builtinTimeComponent implements Pine's year(time)/month(time)/hour(time,
+// tz) family, extracting a component from a time value.
+func (r *Runtime) builtinTimeComponent(name string, args []interface{}) (interface{}, bool, error) {
+	if len(args) < 1 || len(args) > 2 {
+		return nil, true, fmt.Errorf("%s(time[, timezone]) expects 1 or 2 args", name)
+	}
+	ms, ok := toFloat(args[0])
+	if !ok || math.IsNaN(ms) {
+		return math.NaN(), true, nil
+	}
+	loc := time.UTC
+	if len(args) == 2 {
+		if s, ok := args[1].(string); ok {
+			loc = parseTimezone(s)
+		}
+	}
+	ts := time.UnixMilli(int64(ms)).In(loc)
+	switch name {
+	case "year":
+		return float64(ts.Year()), true, nil
+	case "month":
+		return float64(ts.Month()), true, nil
+	case "dayofmonth":
+		return float64(ts.Day()), true, nil
+	case "dayofweek":
+		return float64(ts.Weekday()) + 1, true, nil
+	case "hour":
+		return float64(ts.Hour()), true, nil
+	case "minute":
+		return float64(ts.Minute()), true, nil
+	case "second":
+		return float64(ts.Second()), true, nil
+	case "weekofyear":
+		_, yw := ts.ISOWeek()
+		return float64(yw), true, nil
+	case "weekofmonth":
+		dom := ts.Day()
+		wd := int(ts.Weekday())
+		if wd == 0 {
+			wd = 7
+		}
+		return float64((dom+wd-1-1)/7 + 1), true, nil
+	}
+	return math.NaN(), true, nil
+}
+
 func (r *Runtime) builtinTime(args []interface{}) (interface{}, bool, error) {
-	if len(args) > 2 {
-		return nil, true, fmt.Errorf("time([timeframe], [session]) expects up to 2 args")
+	// v4/v5 signature: time(timeframe, session, timezone). timeframe/session
+	// are ignored (daily bars); the current bar's open time is returned.
+	if len(args) > 3 {
+		return nil, true, fmt.Errorf("time([timeframe], [session], [timezone]) expects up to 3 args")
 	}
 	return float64(r.barOpenTime().UTC().UnixMilli()), true, nil
 }
 
 func (r *Runtime) builtinTimeClose(args []interface{}) (interface{}, bool, error) {
-	if len(args) > 2 {
-		return nil, true, fmt.Errorf("time_close([timeframe], [session]) expects up to 2 args")
+	if len(args) > 3 {
+		return nil, true, fmt.Errorf("time_close([timeframe], [session], [timezone]) expects up to 3 args")
 	}
 	return float64(r.barCloseTime().UTC().UnixMilli()), true, nil
 }
@@ -842,6 +927,103 @@ func (r *Runtime) builtinLog(level string, args []interface{}) (interface{}, boo
 	return math.NaN(), true, nil
 }
 
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// normalizeTzOffset rewrites a trailing malformed timezone offset like
+// "-3000" (which reads as hh=30, invalid) into the "-03:00" form the parse
+// layouts accept. Reports ok=false when the string has no trailing offset.
+func normalizeTzOffset(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if len(s) < 5 {
+		return s, false
+	}
+	tail := s[len(s)-5:]
+	if tail[0] != '+' && tail[0] != '-' {
+		return s, false
+	}
+	hh := tail[1:3]
+	mm := tail[3:]
+	if hh < "0" || hh > "14" {
+		// impossible hour: treat the digits as hours-first ("-3000" -> -3:00)
+		if len(tail) == 5 && tail[3] == '0' && tail[4] == '0' {
+			return s[:len(s)-5] + tail[:1] + "0" + tail[1:2] + ":00", true
+		}
+		return s, false
+	}
+	return s[:len(s)-5] + tail[:3] + ":" + mm, true
+}
+
+// parseISOStringTime parses the v4+ single-string timestamp() form, e.g.
+// "2023-01-01T00:00:00", "2023-01-01 00:00", "01 Jan 2000 13:30 +0000" or
+// "1 Jan 2023".
+func parseISOStringTime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05-07:00",
+		"2006-01-02T15:04:05-0700",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02",
+		"2006.01.02",
+		"2006 1 2",
+		"2006 01 02",
+		"2006/01/02 15:04",
+		"2006/01/02",
+		"02 Jan 2006 15:04:05 -07:00",
+		"02 Jan 2006 15:04:05 -0700",
+		"02 Jan 2006 15:04:05 MST",
+		"02 Jan 2006 15:04:05",
+		"02 Jan 2006 15:04 -07:00",
+		"02 Jan 2006 15:04 -0700",
+		"02 Jan 2006 15:04 MST",
+		"02 Jan 2006 15:04",
+		"2 Jan 2006 15:04:05 -0700",
+		"2 Jan 2006 15:04:05 MST",
+		"2 Jan 2006 15:04:05",
+		"2 Jan 2006 15:04 -0700",
+		"2 Jan 2006 15:04 MST",
+		"2 Jan 2006 15:04",
+		"2 Jan 2006 15:04:05 UTC",
+		"2 Jan 2006 15:04 UTC",
+		"02 Jan 2006 -0700",
+		"02 Jan 2006",
+		"2 Jan 2006",
+		"02 January 2006 15:04:05 -0700",
+		"02 January 2006 15:04:05 MST",
+		"02 January 2006 15:04:05",
+		"02 January 2006 15:04 -0700",
+		"02 January 2006 15:04 MST",
+		"02 January 2006 15:04",
+		"2 January 2006 15:04:05 -0700",
+		"2 January 2006 15:04:05 MST",
+		"2 January 2006 15:04:05",
+		"2 January 2006 15:04 -0700",
+		"2 January 2006 15:04 MST",
+		"2 January 2006 15:04",
+		"2 January 2006",
+		"2 January 2006 MST",
+		"2 January 2006 -0700",
+		"Jan 2 2006 15:04:05",
+		"Jan 2 2006",
+		"2006-01-02 15:04:05 -0700",
+		"2006-01-02 15:04 -0700",
+		"2006-01-02 15:04:05 MST",
+		"2006-01-02 15:04 MST",
+	} {
+		if ts, err := time.Parse(layout, s); err == nil {
+			return ts, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("timestamp: cannot parse %q", s)
+}
+
 func parseTimezone(loc string) *time.Location {
 	loc = strings.TrimSpace(loc)
 	if loc == "" {
@@ -878,7 +1060,51 @@ func parseTimezone(loc string) *time.Location {
 }
 
 func (r *Runtime) builtinTimestamp(args []interface{}) (interface{}, bool, error) {
+	if len(args) == 1 {
+		// v4+ form: timestamp("2023-01-01T00:00:00")
+		if s, ok := args[0].(string); ok {
+			ts, err := parseISOStringTime(s)
+			if err != nil {
+				// Converted sources often carry malformed timezone offsets
+				// ("01 Jan 2023 00:00 -3000" meaning GMT-3): retry with the
+				// offset normalized to ±hh:mm before failing the script.
+				if fixed, ok2 := normalizeTzOffset(s); ok2 {
+					ts2, err2 := parseISOStringTime(fixed)
+					if err2 != nil {
+						return nil, true, err
+					}
+					return float64(ts2.UTC().UnixMilli()), true, nil
+				}
+				return nil, true, err
+			}
+			return float64(ts.UTC().UnixMilli()), true, nil
+		}
+	}
 	if len(args) < 3 {
+		// Tolerate partial numeric forms (e.g. timestamp(2022) or a single
+		// string plus ints from a mangled named-arg rewrite) instead of
+		// failing: pad missing y/m/d components so the call still yields a
+		// sensible date. A wrong-but-parseable date only shifts a session
+		// filter; a compile_error loses the whole strategy.
+		vals := make([]int, 6)
+		pos := 0
+		if len(args) > 0 {
+			if _, ok := args[0].(string); ok && len(args) > 1 {
+				pos = 1
+			}
+		}
+		for i := 0; pos < len(args) && i < 6; i++ {
+			f, ok := toFloat(args[pos])
+			if !ok {
+				break
+			}
+			vals[i] = int(f)
+			pos++
+		}
+		if vals[0] > 0 {
+			ts := time.Date(vals[0], time.Month(maxInt(vals[1], 1)), maxInt(vals[2], 1), vals[3], vals[4], vals[5], 0, time.UTC)
+			return float64(ts.UTC().UnixMilli()), true, nil
+		}
 		return nil, true, fmt.Errorf("timestamp expects at least 3 args")
 	}
 	loc := time.UTC

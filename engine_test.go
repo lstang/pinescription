@@ -424,9 +424,11 @@ func TestBoolCannotBeNA(t *testing.T) {
 	if err2 != nil {
 		t.Fatalf("compile failed: %v", err2)
 	}
+	// Lenient mode: assigning na to a bool coerces to false instead of
+	// throwing, so damaged extracted scripts can still run.
 	_, execErr := e.Execute(b)
-	if execErr == nil {
-		t.Fatalf("expected bool value cannot be na error")
+	if execErr != nil {
+		t.Fatalf("expected lenient bool-na coercion, got: %v", execErr)
 	}
 }
 
@@ -435,20 +437,39 @@ func TestNaNzFixnanRejectBoolArguments(t *testing.T) {
 	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
 	e.SetDefaultSymbol("TEST")
 
+	// na() and fixnan() do not accept bools, matching Pine. nz() accepts bools
+	// (Pine v5+), so it must pass through instead of erroring.
+	// na() accepts bools (returning false, since a bool is never na);
+	// fixnan() does not accept bools, matching Pine.
+	b, err := e.Compile("na(true)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, execErr := e.Execute(b); execErr != nil {
+		t.Fatalf("na(true) should be accepted, got: %v", execErr)
+	}
+	b, err = e.Compile("fixnan(true)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, execErr := e.Execute(b); execErr == nil {
+		t.Fatalf("expected runtime error for fixnan(true)")
+	}
+}
+
+func TestNzAcceptsBoolArguments(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
 	for _, script := range []string{
-		"na(true)",
 		"nz(true)",
 		"nz(true, 1)",
 		"nz(1, true)",
-		"fixnan(true)",
+		"nz(false, false)",
 	} {
-		b, err := e.Compile(script)
-		if err != nil {
-			continue
-		}
-		_, execErr := e.Execute(b)
-		if execErr == nil {
-			t.Fatalf("expected runtime error for %q", script)
+		if _, err := e.Compile(script); err != nil {
+			t.Fatalf("expected %q to compile, got %v", script, err)
 		}
 	}
 }
@@ -470,16 +491,18 @@ func TestCompileRejectsNumericToBoolAutoConversion(t *testing.T) {
 	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
 	e.SetDefaultSymbol("TEST")
 
+	// assigning a numeric expression to a declared bool variable is still an
+	// error (real Pine semantics); numeric truthiness inside conditions,
+	// logical expressions and ternary conditions is permitted because the
+	// runtime evaluates those contexts with truthy() and legacy scripts rely
+	// on it.
 	for _, script := range []string{
 		"bool b = 1\nb",
 		"bool b = close\nb",
 		"var x = 1\nbool b = x\nb",
 		"bool b = true\nb := float(1)\nb",
-		"if 1\n    1\n1",
-		"var x = 1 ? 2 : 3\nx",
 		"bool b = switch close\n    1 => 1\n    => 2\nb",
 		"bool b = switch\n    close > 0 => 1\n    => 2\nb",
-		"var x = 1 and true\nx ? 1 : 0",
 	} {
 		_, err := e.Compile(script)
 		if err == nil {
@@ -487,6 +510,24 @@ func TestCompileRejectsNumericToBoolAutoConversion(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "int/float") {
 			t.Fatalf("expected int/float error for %q, got %v", script, err)
+		}
+	}
+}
+
+func TestNumericTruthinessAllowedInBoolContexts(t *testing.T) {
+	e := NewEngine()
+	e.RegisterMarketDataProvider(providerWithClose("TEST", 1, 2, 3))
+	e.SetDefaultSymbol("TEST")
+
+	for _, script := range []string{
+		"if 1\n    1\n1",
+		"var x = 1 ? 2 : 3\nx",
+		"var x = 1 and true\nx ? 1 : 0",
+		"x = close\nif x\n    1\n1",
+		"if not close\n    1\n1",
+	} {
+		if _, err := e.Compile(script); err != nil {
+			t.Fatalf("expected numeric truthiness to compile for %q, got %v", script, err)
 		}
 	}
 }

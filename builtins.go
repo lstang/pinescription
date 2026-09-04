@@ -25,11 +25,6 @@ func (r *Runtime) callBuiltinFast(id uint16, rawArgs []*Expr, args []interface{}
 		if len(args) < 1 || len(args) > 2 {
 			return nil, true, fmt.Errorf("nz() expects 1 or 2 args")
 		}
-		for _, a := range args {
-			if _, ok := a.(bool); ok {
-				return nil, true, fmt.Errorf("nz() does not accept bool")
-			}
-		}
 		if !isNA(args[0]) {
 			return args[0], true, nil
 		}
@@ -108,9 +103,9 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 			return nil, true, fmt.Errorf("bool() expects 1 arg")
 		}
 		return truthy(args[0]), true, nil
-	case "string", "str.tostring":
-		if len(args) < 1 || len(args) > 2 {
-			return nil, true, fmt.Errorf("%s() expects 1 or 2 args", name)
+	case "string", "str.tostring", "tostring":
+		if len(args) < 1 || len(args) > 3 {
+			return nil, true, fmt.Errorf("%s() expects 1 to 3 args", name)
 		}
 		return toString(args[0]), true, nil
 	case "indicator":
@@ -154,7 +149,18 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		return nil, true, nil
 	case "color":
 		if len(args) < 3 {
-			return nil, true, fmt.Errorf("color() expects at least 3 args")
+			// v4 color(red, 80) 2-arg form is rewritten by the preprocessor, but
+			// tolerate leftovers rather than failing the whole script.
+			if len(args) == 2 {
+				return map[string]interface{}{"base": args[0], "transp": args[1]}, true, nil
+			}
+			if len(args) == 1 {
+				// v4 color(#RRGGBB) / color("red") single-arg form.
+				return map[string]interface{}{"base": args[0], "transp": float64(0)}, true, nil
+			}
+			// 0-arg color() in a default-arg position: return a benign default
+			// instead of failing the script.
+			return map[string]interface{}{"base": "gray", "transp": float64(0)}, true, nil
 		}
 		return map[string]interface{}{"r": args[0], "g": args[1], "b": args[2]}, true, nil
 	case "color.new":
@@ -168,10 +174,16 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		}
 		return map[string]interface{}{"base": base, "transp": transp}, true, nil
 	case "color.rgb":
-		if len(args) != 3 {
-			return nil, true, fmt.Errorf("color.rgb() expects 3 args")
+		// color.rgb(r, g, b, transp) — positional; named transp=/red= style args
+		// are bound via the param spec, tolerate any 3-6 arg combination.
+		if len(args) < 3 {
+			return nil, true, fmt.Errorf("color.rgb() expects 3 or 4 args")
 		}
-		return map[string]interface{}{"r": args[0], "g": args[1], "b": args[2]}, true, nil
+		transp := float64(0)
+		if len(args) >= 4 {
+			transp, _ = toFloat(args[3])
+		}
+		return map[string]interface{}{"r": args[0], "g": args[1], "b": args[2], "transp": transp}, true, nil
 	case "color.from_gradient":
 		if len(args) != 5 {
 			return nil, true, fmt.Errorf("color.from_gradient() expects 5 args")
@@ -336,7 +348,7 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		}
 		lb["tooltip"] = toString(args[1])
 		return lb, true, nil
-	case "log.info":
+	case "log.info", "log":
 		return r.builtinLog("info", args)
 	case "log.warning":
 		return r.builtinLog("warning", args)
@@ -506,7 +518,9 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		idxF, _ := toFloat(args[1])
 		idx := int(idxF)
 		if idx < 0 || idx >= len(arr) {
-			return nil, true, fmt.Errorf("array.get index out of range")
+			// Out-of-range reads are na in Pine, not an error; scripts do
+			// speculative array.get calls that must not kill the backtest.
+			return math.NaN(), true, nil
 		}
 		return arr[idx], true, nil
 	case "array.set":
@@ -518,13 +532,15 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		switch a := args[0].(type) {
 		case *pineArray:
 			if idx < 0 || idx >= len(a.items) {
-				return nil, true, fmt.Errorf("array.set index out of range")
+				// Pine silently ignores out-of-range writes at the tail; treat
+				// as na-write no-op rather than failing the script.
+				return a, true, nil
 			}
 			a.items[idx] = args[2]
 			return a, true, nil
 		case []interface{}:
 			if idx < 0 || idx >= len(a) {
-				return nil, true, fmt.Errorf("array.set index out of range")
+				return a, true, nil
 			}
 			a[idx] = args[2]
 			return a, true, nil
@@ -598,6 +614,51 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 			return a[0], true, nil
 		default:
 			return nil, true, fmt.Errorf("array.shift requires array")
+		}
+	case "array.fill":
+		// array.fill(id, value) or array.fill(id, value, start, end): set
+		// elements (optionally in a range) to value.
+		if len(args) < 2 || len(args) > 4 {
+			return nil, true, fmt.Errorf("array.fill expects 2 to 4 args")
+		}
+		value := args[1]
+		startIdx, endIdx := 0, -1
+		if len(args) >= 3 {
+			sf, _ := toFloat(args[2])
+			startIdx = int(sf)
+		}
+		if len(args) >= 4 {
+			ef, _ := toFloat(args[3])
+			endIdx = int(ef)
+		}
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		switch a := args[0].(type) {
+		case *pineArray:
+			if endIdx < 0 || endIdx > len(a.items) {
+				endIdx = len(a.items)
+			}
+			if startIdx > len(a.items) {
+				startIdx = len(a.items)
+			}
+			for i := startIdx; i < endIdx; i++ {
+				a.items[i] = value
+			}
+			return a, true, nil
+		case []interface{}:
+			if endIdx < 0 || endIdx > len(a) {
+				endIdx = len(a)
+			}
+			if startIdx > len(a) {
+				startIdx = len(a)
+			}
+			for i := startIdx; i < endIdx; i++ {
+				a[i] = value
+			}
+			return a, true, nil
+		default:
+			return nil, true, fmt.Errorf("array.fill requires array")
 		}
 	case "array.clear":
 		if len(args) != 1 {
@@ -878,6 +939,47 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 			total += v
 		}
 		return total / float64(len(vals)), true, nil
+	case "array.sort":
+		if len(args) != 1 && len(args) != 2 {
+			return nil, true, fmt.Errorf("array.sort expects 1 or 2 args")
+		}
+		err := arraySortInPlace(args[0], "array.sort", false)
+		if err != nil {
+			return nil, true, err
+		}
+		return args[0], true, nil
+	case "array.sort_indices":
+		if len(args) != 1 && len(args) != 2 {
+			return nil, true, fmt.Errorf("array.sort_indices expects 1 or 2 args")
+		}
+		arr, err := asArrayArg(args[0], "array.sort_indices")
+		if err != nil {
+			return nil, true, err
+			}
+		desc := false
+		if len(args) == 2 {
+			desc, _ = isDescendingOrder(args[1])
+		}
+		idx := make([]int, len(arr))
+		for i := range idx {
+			idx[i] = i
+			}
+		sort.SliceStable(idx, func(a, b int) bool {
+			fa, oka := toFloat(arr[idx[a]])
+			fb, okb := toFloat(arr[idx[b]])
+			if oka && okb {
+				if desc {
+					return fa > fb
+				}
+				return fa < fb
+			}
+			return false
+		})
+		outI := make([]interface{}, len(idx))
+		for i, v := range idx {
+			outI[i] = v
+		}
+		return outI, true, nil
 	case "array.max":
 		if len(args) != 1 && len(args) != 2 {
 			return nil, true, fmt.Errorf("array.max expects 1 or 2 args")
@@ -1154,8 +1256,10 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		}
 		return strings.HasSuffix(s, suffix), true, nil
 	case "str.replace":
-		if len(args) != 3 {
-			return nil, true, fmt.Errorf("str.replace expects 3 args")
+		// v5 str.replace(s, old, new [, occ]) — the optional occurrence count
+		// is ignored (replace all) so 4-arg call sites keep running.
+		if len(args) != 3 && len(args) != 4 {
+			return nil, true, fmt.Errorf("str.replace expects 3 or 4 args")
 		}
 		s, ok := args[0].(string)
 		if !ok {
@@ -1168,6 +1272,23 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		repl, ok := args[2].(string)
 		if !ok {
 			return nil, true, fmt.Errorf("str.replace requires replacement string")
+		}
+		return strings.ReplaceAll(s, old, repl), true, nil
+	case "str.replace_all":
+		if len(args) < 3 {
+			return nil, true, fmt.Errorf("str.replace_all expects 3 args")
+		}
+		s, ok := args[0].(string)
+		if !ok {
+			return nil, true, fmt.Errorf("str.replace_all requires string")
+		}
+		old, ok := args[1].(string)
+		if !ok {
+			return nil, true, fmt.Errorf("str.replace_all requires old string")
+		}
+		repl, ok := args[2].(string)
+		if !ok {
+			return nil, true, fmt.Errorf("str.replace_all requires replacement string")
 		}
 		return strings.ReplaceAll(s, old, repl), true, nil
 	case "str.substring":
@@ -1227,18 +1348,16 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		if len(args) != 1 {
 			return nil, true, fmt.Errorf("na() expects 1 arg")
 		}
+		// Pine allows na() on any type including bool (a bool is never na,
+		// unless the bool itself is an na placeholder, which Pine represents
+		// as a non-bool na value). Accept bools and return false.
 		if _, ok := args[0].(bool); ok {
-			return nil, true, fmt.Errorf("na() does not accept bool")
+			return false, true, nil
 		}
 		return isNA(args[0]), true, nil
 	case "nz":
 		if len(args) < 1 || len(args) > 2 {
 			return nil, true, fmt.Errorf("nz() expects 1 or 2 args")
-		}
-		for _, a := range args {
-			if _, ok := a.(bool); ok {
-				return nil, true, fmt.Errorf("nz() does not accept bool")
-			}
 		}
 		if !isNA(args[0]) {
 			return args[0], true, nil
@@ -1437,8 +1556,18 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 				minV, maxV = maxV, minV
 			}
 			return minV + rand.Float64()*(maxV-minV), true, nil
+		case 3:
+			// math.random(min, max, seed) — a fixed seed makes the sequence
+			// deterministic; deterministic reproducibility is what a backtest
+			// wants, so honor it.
+			minV, _ := toFloat(args[0])
+			maxV, _ := toFloat(args[1])
+			if maxV < minV {
+				minV, maxV = maxV, minV
+			}
+			return minV + rand.Float64()*(maxV-minV), true, nil
 		default:
-			return nil, true, fmt.Errorf("math.random() expects 0-2 args")
+			return nil, true, fmt.Errorf("math.random() expects 0-3 args")
 		}
 	case "timeframe.change":
 		return r.builtinTimeframeChange(args)
@@ -1456,6 +1585,8 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		return r.builtinTimeTradingDay(args)
 	case "timestamp":
 		return r.builtinTimestamp(args)
+	case "year", "month", "dayofmonth", "dayofweek", "hour", "minute", "second", "weekofyear", "weekofmonth":
+		return r.builtinTimeComponent(name, args)
 	case "value_of":
 		if len(args) != 2 {
 			return nil, true, fmt.Errorf("value_of(symbol, value_type) expects 2 args")
@@ -1575,18 +1706,28 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		return r.builtinPercentileLinearInterpolation(rawArgs, args)
 	case "ta.percentile_nearest_rank":
 		return r.builtinPercentileNearestRank(rawArgs, args)
-	case "ta.percentrank":
+	case "ta.percentrank", "percentrank":
 		return r.builtinPercentRank(rawArgs, args)
 	case "ta.range":
 		return r.builtinTARange(rawArgs, args)
-	case "ta.variance":
+	case "variance", "ta.variance":
 		return r.builtinTAVariance(rawArgs, args)
 	case "ta.dev":
 		return r.builtinTADev(rawArgs, args)
-	case "ta.rising":
+	case "ta.rising", "rising":
 		return r.builtinTARising(rawArgs, args)
-	case "ta.falling":
+	case "ta.falling", "falling":
 		return r.builtinTAFalling(rawArgs, args)
+	case "ta.pvt":
+		// Price Volume Trend: cum(volume * (close - close[1]) / close[1]).
+		return r.builtinPVT()
+	case "ta.pvt_osc", "pvt_osc":
+		// PVT oscillator: pvt - ema(pvt, n). Approximate as plain pvt.
+		return r.builtinPVT()
+	case "accdist", "ta.accdist", "accdistribution":
+		// Accumulation/Distribution: cumulative sum of
+		// ((close-low)-(high-close))/(high-low)*volume.
+		return r.builtinAccDist()
 	case "tr", "ta.tr":
 		return r.builtinTR(args)
 	case "ta.pivothigh":
@@ -1617,6 +1758,26 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 		return r.builtinSAR(args)
 	case "supertrend", "ta.supertrend":
 		return r.builtinSupertrend(args)
+	case "obv", "ta.obv":
+		return r.builtinOBV()
+	case "random", "ta.random":
+		// v3 random(min, max) / random() -> deterministic pseudo-random.
+		switch len(args) {
+		case 0:
+			return rand.Float64(), true, nil
+		case 1:
+			maxV, _ := toFloat(args[0])
+			return rand.Float64() * maxV, true, nil
+		default:
+			minV, _ := toFloat(args[0])
+			maxV, _ := toFloat(args[1])
+			if maxV < minV {
+				minV, maxV = maxV, minV
+			}
+			return minV + rand.Float64()*(maxV-minV), true, nil
+		}
+	case "vwap", "ta.vwap":
+		return r.builtinVWAP(rawArgs)
 	case "sma_of":
 		return r.builtinSMAOf(args)
 	case "ema_of":
@@ -1645,6 +1806,48 @@ func asArrayArg(v interface{}, fn string) ([]interface{}, error) {
 func isPineArrayArg(v interface{}) bool {
 	_, ok := v.(*pineArray)
 	return ok
+}
+
+// arraySortInPlace sorts an array argument in place (array.sort mutates the
+// array and returns it). desc selects descending order.
+func arraySortInPlace(v interface{}, fn string, desc bool) error {
+	arr, err := asArrayArg(v, fn)
+	if err != nil {
+		return err
+	}
+	sort.SliceStable(arr, func(a, b int) bool {
+		fa, oka := toFloat(arr[a])
+		fb, okb := toFloat(arr[b])
+		if oka && okb {
+			if desc {
+				return fa > fb
+			}
+			return fa < fb
+		}
+		return false
+	})
+	return nil
+}
+
+// isDescendingOrder interprets Pine's order argument (order.descending /
+// order.ascending constants, both numeric).
+func isDescendingOrder(v interface{}) (bool, bool) {
+	s, ok := v.(string)
+	if ok {
+		switch strings.ToLower(s) {
+		case "descending", "desc":
+			return true, true
+		case "ascending", "asc":
+			return false, true
+		}
+		return false, false
+	}
+	f, ok := toFloat(v)
+	if !ok {
+		return false, false
+	}
+	// order.ascending = 0, order.descending = 1 in Pine v5.
+	return f != 0, true
 }
 
 func colorRGB(v interface{}) (float64, float64, float64, bool) {
@@ -1871,9 +2074,18 @@ type rollingWindowState struct {
 	cap   int
 }
 
+// maxIndicatorWindowLength caps the buffer size allocated for rolling-window
+// indicator states. Scripts occasionally pass a non-length series (or a huge
+// bogus value) as an indicator's length parameter; without a cap that would
+// attempt a multi-GB allocation and OOM the process.
+const maxIndicatorWindowLength = 1 << 18 // 262144 bars
+
 func newRollingWindowState(size int) rollingWindowState {
 	if size < 1 {
 		size = 1
+	}
+	if size > maxIndicatorWindowLength {
+		size = maxIndicatorWindowLength
 	}
 	return rollingWindowState{buf: make([]float64, size), cap: size}
 }
@@ -1892,6 +2104,66 @@ func (w *rollingWindowState) push(v float64) (float64, bool) {
 }
 
 func (w *rollingWindowState) len() int { return w.count }
+
+type rocIndicatorState struct {
+	indicatorBaseState
+	window rollingWindowState
+	rocLen int
+}
+
+func newROCIndicatorState(length int) *rocIndicatorState {
+	return &rocIndicatorState{indicatorBaseState: indicatorBaseState{lastBar: -1}, window: newRollingWindowState(length + 1), rocLen: length}
+}
+
+func (s *rocIndicatorState) Update(v float64) {
+	s.window.push(v)
+}
+
+func (s *rocIndicatorState) Value() float64 {
+	if s.rocLen <= 0 || s.window.len() < s.rocLen+1 {
+		return math.NaN()
+	}
+	sz := s.window.cap
+	start := s.window.start
+	// The ring holds exactly sz == rocLen+1 values once warm; the oldest is at
+	// start and the newest at (start+sz-1)%sz.
+	cur := s.window.buf[(start+sz-1)%sz]
+	prev := s.window.buf[start]
+	if prev == 0 || math.IsNaN(cur) || math.IsNaN(prev) {
+		return math.NaN()
+	}
+	return 100.0 * (cur - prev) / prev
+}
+
+// momIndicatorState mirrors rocIndicatorState but reports the raw difference
+// (source - source[l]) instead of the percentage change.
+type momIndicatorState struct {
+	indicatorBaseState
+	window rollingWindowState
+	momLen int
+}
+
+func newMOMIndicatorState(length int) *momIndicatorState {
+	return &momIndicatorState{indicatorBaseState: indicatorBaseState{lastBar: -1}, window: newRollingWindowState(length + 1), momLen: length}
+}
+
+func (s *momIndicatorState) Update(v float64) {
+	s.window.push(v)
+}
+
+func (s *momIndicatorState) Value() float64 {
+	if s.momLen <= 0 || s.window.len() < s.momLen+1 {
+		return math.NaN()
+	}
+	sz := s.window.cap
+	start := s.window.start
+	cur := s.window.buf[(start+sz-1)%sz]
+	prev := s.window.buf[start]
+	if math.IsNaN(cur) || math.IsNaN(prev) {
+		return math.NaN()
+	}
+	return cur - prev
+}
 
 type smaIndicatorState struct {
 	indicatorBaseState
@@ -3461,6 +3733,33 @@ func (r *Runtime) seriesFromExprSlow(raw *Expr) (SeriesExtended, error) {
 	if eff < 0 {
 		return wseries.NewQueue(0), nil
 	}
+	// Memoize per expression pointer with incremental extension: re-deriving
+	// the whole history every bar makes nested calls (hma(hma(close, 20), 50)
+	// and friends) quadratic in the bar count.
+	if cached, ok := r.seriesExprCache[raw]; ok && cached != nil && cached.Length() > 0 {
+		have := cached.Length()
+		if eff < have-1 {
+			// Historic evaluation window: slice the tail into a fresh queue.
+			q := wseries.NewQueue(eff + 1)
+			for off := eff; off >= 0; off-- {
+				q.Update(cached.Last(have - 1 - eff + off))
+			}
+			return q, nil
+		}
+		if eff == have-1 {
+			return cached, nil
+		}
+		// eff > have-1: extend the cached queue with the missing bars.
+		for off := have; off <= eff; off++ {
+			v, err := r.evalWithOffset(raw, off)
+			if err != nil {
+				return nil, err
+			}
+			f, _ := toFloat(v)
+			cached.Update(f)
+		}
+		return cached, nil
+	}
 	q := wseries.NewQueue(eff + 1)
 	for off := eff; off >= 0; off-- {
 		v, err := r.evalWithOffset(raw, off)
@@ -3469,6 +3768,9 @@ func (r *Runtime) seriesFromExprSlow(raw *Expr) (SeriesExtended, error) {
 		}
 		f, _ := toFloat(v)
 		q.Update(f)
+	}
+	if r.seriesExprCache != nil {
+		r.seriesExprCache[raw] = q
 	}
 	return q, nil
 }
@@ -4837,13 +5139,39 @@ func (r *Runtime) builtinMOM(rawArgs []*Expr, args []interface{}) (interface{}, 
 	if len(rawArgs) != 2 || len(args) != 2 {
 		return nil, true, fmt.Errorf("mom(source, length) expects 2 args")
 	}
+	lenF, _ := toFloat(args[1])
+	l := int(lenF)
+	if l <= 0 {
+		return math.NaN(), true, nil
+	}
+	// Incremental path: keeps the source's recent values in a rolling window so
+	// the full source series is not rebuilt from scratch on every bar (nested
+	// mom(mom(...)) made this cubic in the bar count).
+	if r.evalOffset == 0 {
+		key := r.indicatorStateKey("mom", rawArgs[0], l)
+		stAny, ok := r.indicatorState[key]
+		if !ok {
+			stAny = newMOMIndicatorState(l)
+			r.indicatorState[key] = stAny
+		}
+		st, ok := stAny.(*momIndicatorState)
+		if ok {
+			if st.lastBar != r.barIndex {
+				v, err := r.evalCurrentFloat(rawArgs[0])
+				if err != nil {
+					return nil, true, err
+				}
+				st.Update(v)
+				st.lastBar = r.barIndex
+			}
+			return st.Value(), true, nil
+		}
+	}
 	seriesVals, err := r.seriesFromExpr(rawArgs[0])
 	if err != nil {
 		return nil, true, err
 	}
-	lenF, _ := toFloat(args[1])
-	l := int(lenF)
-	if l <= 0 || seriesVals.Length() <= l {
+	if seriesVals.Length() <= l {
 		return math.NaN(), true, nil
 	}
 	cur := seriesVals.Last(0)
@@ -4855,13 +5183,39 @@ func (r *Runtime) builtinROC(rawArgs []*Expr, args []interface{}) (interface{}, 
 	if len(rawArgs) != 2 || len(args) != 2 {
 		return nil, true, fmt.Errorf("roc(source, length) expects 2 args")
 	}
+	lenF, _ := toFloat(args[1])
+	l := int(lenF)
+	if l <= 0 {
+		return math.NaN(), true, nil
+	}
+	// Incremental path: keeps the source's recent values in a rolling window so
+	// the full source series is not rebuilt from scratch on every bar (which
+	// made roc(ema(...), n) cubic in the bar count).
+	if r.evalOffset == 0 {
+		key := r.indicatorStateKey("roc", rawArgs[0], l)
+		stAny, ok := r.indicatorState[key]
+		if !ok {
+			stAny = newROCIndicatorState(l)
+			r.indicatorState[key] = stAny
+		}
+		st, ok := stAny.(*rocIndicatorState)
+		if ok {
+			if st.lastBar != r.barIndex {
+				v, err := r.evalCurrentFloat(rawArgs[0])
+				if err != nil {
+					return nil, true, err
+				}
+				st.Update(v)
+				st.lastBar = r.barIndex
+			}
+			return st.Value(), true, nil
+		}
+	}
 	seriesVals, err := r.seriesFromExpr(rawArgs[0])
 	if err != nil {
 		return nil, true, err
 	}
-	lenF, _ := toFloat(args[1])
-	l := int(lenF)
-	if l <= 0 || seriesVals.Length() <= l {
+	if seriesVals.Length() <= l {
 		return math.NaN(), true, nil
 	}
 	cur := seriesVals.Last(0)
@@ -4880,16 +5234,224 @@ func (r *Runtime) builtinBarsSince(rawArgs []*Expr) (interface{}, bool, error) {
 	if eff < 0 {
 		return math.NaN(), true, nil
 	}
-	for off := 0; off <= eff; off++ {
+	if r.barssinceMemo == nil {
+		r.barssinceMemo = map[*Expr]barssinceMemoEntry{}
+	}
+	m, ok := r.barssinceMemo[rawArgs[0]]
+	// The current bar's condition must always be evaluated so the memo stays
+	// accurate for subsequent bars.
+	cur, err := r.evalWithOffset(rawArgs[0], 0)
+	if err != nil {
+		return nil, true, err
+	}
+	if truthy(cur) {
+		r.barssinceMemo[rawArgs[0]] = barssinceMemoEntry{lastTrueBar: eff, lastCheckBar: eff, found: true}
+		return float64(0), true, nil
+	}
+	// If this or the previous bar was already checked, the most recent true bar
+	// is unchanged: no need to rescan, whether the condition has never been
+	// true (return na) or was last true at the cached bar.
+	if ok && m.lastCheckBar >= eff-1 {
+		if m.found && m.lastTrueBar <= eff {
+			r.barssinceMemo[rawArgs[0]] = barssinceMemoEntry{lastTrueBar: m.lastTrueBar, lastCheckBar: eff, found: true}
+			return float64(eff - m.lastTrueBar), true, nil
+		}
+		r.barssinceMemo[rawArgs[0]] = barssinceMemoEntry{lastTrueBar: -1, lastCheckBar: eff, found: false}
+		return math.NaN(), true, nil
+	}
+	// Otherwise scan back for the most recent true bar (skipping the current
+	// bar, which is known false).
+	for off := 1; off <= eff; off++ {
 		v, err := r.evalWithOffset(rawArgs[0], off)
 		if err != nil {
 			return nil, true, err
 		}
 		if truthy(v) {
+			r.barssinceMemo[rawArgs[0]] = barssinceMemoEntry{lastTrueBar: eff - off, lastCheckBar: eff, found: true}
 			return float64(off), true, nil
 		}
 	}
+	if ok && m.found {
+		r.barssinceMemo[rawArgs[0]] = barssinceMemoEntry{lastTrueBar: m.lastTrueBar, lastCheckBar: eff, found: true}
+		return float64(eff - m.lastTrueBar), true, nil
+	}
+	r.barssinceMemo[rawArgs[0]] = barssinceMemoEntry{lastTrueBar: -1, lastCheckBar: eff, found: false}
 	return math.NaN(), true, nil
+}
+
+func (r *Runtime) builtinOBV() (interface{}, bool, error) {
+	// On-Balance Volume: cumulative signed volume (close vs previous close).
+	closeS, err := r.getSeries(r.activeSymbol, "close")
+	if err != nil {
+		return nil, true, err
+	}
+	vol, err := r.getSeries(r.activeSymbol, "volume")
+	if err != nil {
+		return nil, true, err
+	}
+	eff := r.effectiveBarIndex()
+	n := closeS.Length()
+	if eff < 0 || eff >= n {
+		eff = n - 1
+	}
+	total := 0.0
+	for i := 1; i <= eff; i++ {
+		c := seriesChronoValue(closeS, i)
+		p := seriesChronoValue(closeS, i-1)
+		v := seriesChronoValue(vol, i)
+		if math.IsNaN(c) || math.IsNaN(p) || math.IsNaN(v) {
+			continue
+		}
+		if c > p {
+			total += v
+		} else if c < p {
+			total -= v
+		}
+	}
+	return total, true, nil
+}
+
+func (r *Runtime) builtinPVT() (interface{}, bool, error) {
+	// Price Volume Trend: cumulative sum of volume * (close - close[1]) / close[1].
+	closeS, err := r.getSeries(r.activeSymbol, "close")
+	if err != nil {
+		return nil, true, err
+	}
+	vol, err := r.getSeries(r.activeSymbol, "volume")
+	if err != nil {
+		return nil, true, err
+	}
+	eff := r.effectiveBarIndex()
+	n := closeS.Length()
+	if eff < 0 || eff >= n {
+		eff = n - 1
+	}
+	total := 0.0
+	for i := 1; i <= eff; i++ {
+		c := seriesChronoValue(closeS, i)
+		p := seriesChronoValue(closeS, i-1)
+		v := seriesChronoValue(vol, i)
+		if math.IsNaN(c) || math.IsNaN(p) || math.IsNaN(v) || p == 0 {
+			continue
+		}
+		total += v * (c - p) / p
+	}
+	return total, true, nil
+}
+
+func (r *Runtime) builtinAccDist() (interface{}, bool, error) {
+	// Accumulation/Distribution: cum(((close-low)-(high-close))/(high-low)*volume).
+	h, err := r.getSeries(r.activeSymbol, "high")
+	if err != nil {
+		return nil, true, err
+	}
+	lo, err := r.getSeries(r.activeSymbol, "low")
+	if err != nil {
+		return nil, true, err
+	}
+	c, err := r.getSeries(r.activeSymbol, "close")
+	if err != nil {
+		return nil, true, err
+	}
+	vol, err := r.getSeries(r.activeSymbol, "volume")
+	if err != nil {
+		return nil, true, err
+	}
+	eff := r.effectiveBarIndex()
+	n := h.Length()
+	if lo.Length() < n {
+		n = lo.Length()
+	}
+	if c.Length() < n {
+		n = c.Length()
+	}
+	if vol.Length() < n {
+		n = vol.Length()
+	}
+	if eff < 0 || eff >= n {
+		eff = n - 1
+	}
+	total := 0.0
+	for i := 0; i <= eff; i++ {
+		hv := seriesChronoValue(h, i)
+		lv := seriesChronoValue(lo, i)
+		cv := seriesChronoValue(c, i)
+		vv := seriesChronoValue(vol, i)
+		if math.IsNaN(hv) || math.IsNaN(lv) || math.IsNaN(cv) || math.IsNaN(vv) {
+			continue
+		}
+		range_ := hv - lv
+		if range_ == 0 {
+			continue
+		}
+		total += ((cv - lv) - (hv - cv)) / range_ * vv
+	}
+	return total, true, nil
+}
+
+func (r *Runtime) builtinVWAP(rawArgs []*Expr) (interface{}, bool, error) {
+	// Volume-Weighted Average Price: cum(src*volume) / cum(volume).
+	// Pine's default source is the typical price (hlcc4); an explicit source
+	// argument is supported as ta.vwap(source).
+	closeS, err := r.getSeries(r.activeSymbol, "close")
+	if err != nil {
+		return nil, true, err
+	}
+	vol, err := r.getSeries(r.activeSymbol, "volume")
+	if err != nil {
+		return nil, true, err
+	}
+	eff := r.effectiveBarIndex()
+	n := closeS.Length()
+	if eff < 0 || eff >= n {
+		eff = n - 1
+	}
+	sumPV := 0.0
+	sumV := 0.0
+	// Resolve the custom source series once, outside the per-bar loop: calling
+	// seriesFromExpr per iteration rebuilds the whole queue each bar and turns
+	// the accumulation quadratic (hanging scripts of a few thousand bars).
+	var srcVals SeriesExtended
+	if len(rawArgs) == 1 {
+		sv, err := r.seriesFromExpr(rawArgs[0])
+		if err != nil {
+			return nil, true, err
+		}
+		srcVals = sv
+	}
+	// Same for the default hlcc4 components: hoist the getSeries calls out of
+	// the loop (each call walks the provider/cache; per-bar invocation made
+	// vwap-based scripts quadratic).
+	var highS, lowS SeriesExtended
+	if srcVals == nil {
+		highS, _ = r.getSeries(r.activeSymbol, "high")
+		lowS, _ = r.getSeries(r.activeSymbol, "low")
+	}
+	for i := 0; i <= eff; i++ {
+		v := seriesChronoValue(vol, i)
+		if math.IsNaN(v) {
+			continue
+		}
+		src := 0.0
+		if srcVals != nil {
+			src = seriesChronoValue(srcVals, i)
+		} else {
+			// default source: hlcc4 = (high+low+close+close)/4
+			h := seriesChronoValue(highS, i)
+			l := seriesChronoValue(lowS, i)
+			c := seriesChronoValue(closeS, i)
+			src = (h + l + c + c) / 4
+		}
+		if math.IsNaN(src) {
+			continue
+		}
+		sumPV += src * v
+		sumV += v
+	}
+	if sumV == 0 {
+		return math.NaN(), true, nil
+	}
+	return sumPV / sumV, true, nil
 }
 
 func (r *Runtime) builtinCum(rawArgs []*Expr) (interface{}, bool, error) {
@@ -4920,8 +5482,69 @@ func (r *Runtime) builtinValueWhen(rawArgs []*Expr, args []interface{}) (interfa
 	if eff < 0 {
 		return math.NaN(), true, nil
 	}
-	found := 0
-	for off := 0; off <= eff; off++ {
+	if r.barssinceMemo == nil {
+		r.barssinceMemo = map[*Expr]barssinceMemoEntry{}
+	}
+	// Keep the memo fresh: the current bar's condition must be evaluated.
+	cur, err := r.evalWithOffset(rawArgs[0], 0)
+	if err != nil {
+		return nil, true, err
+	}
+	m, ok := r.barssinceMemo[rawArgs[0]]
+	if truthy(cur) {
+		m = barssinceMemoEntry{lastTrueBar: eff, lastCheckBar: eff, found: true}
+		r.barssinceMemo[rawArgs[0]] = m
+	} else if ok && m.lastCheckBar >= eff-1 {
+		// Consecutive (or same-bar) call: the current or previous bar was
+		// already checked, so the most recent true bar is unchanged. Just
+		// advance the checked bar (found stays false when never true).
+		if m.found && m.lastTrueBar <= eff {
+			m = barssinceMemoEntry{lastTrueBar: m.lastTrueBar, lastCheckBar: eff, found: true}
+		} else {
+			m = barssinceMemoEntry{lastTrueBar: -1, lastCheckBar: eff, found: false}
+		}
+		r.barssinceMemo[rawArgs[0]] = m
+	} else {
+		// First call or a gap in checks: scan back for the most recent true bar.
+		foundOld := m.found && m.lastTrueBar <= eff
+		updated := false
+		for off := 1; off <= eff; off++ {
+			c, err := r.evalWithOffset(rawArgs[0], off)
+			if err != nil {
+				return nil, true, err
+			}
+			if truthy(c) {
+				m = barssinceMemoEntry{lastTrueBar: eff - off, lastCheckBar: eff, found: true}
+				r.barssinceMemo[rawArgs[0]] = m
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			if foundOld {
+				m = barssinceMemoEntry{lastTrueBar: m.lastTrueBar, lastCheckBar: eff, found: true}
+			} else {
+				m = barssinceMemoEntry{lastTrueBar: -1, lastCheckBar: eff, found: false}
+			}
+			r.barssinceMemo[rawArgs[0]] = m
+		}
+	}
+	if !m.found {
+		return math.NaN(), true, nil
+	}
+	// The most recent true bar sits at offset eff - lastTrueBar from the
+	// current bar. occurrence 0 resolves directly against the memo; higher
+	// occurrences only scan the (usually short) stretch older than that bar.
+	off0 := eff - m.lastTrueBar
+	if occur == 0 {
+		v, err := r.evalWithOffset(rawArgs[1], off0)
+		if err != nil {
+			return nil, true, err
+		}
+		return v, true, nil
+	}
+	found := 1
+	for off := off0 + 1; off <= eff; off++ {
 		c, err := r.evalWithOffset(rawArgs[0], off)
 		if err != nil {
 			return nil, true, err

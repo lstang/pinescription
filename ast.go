@@ -71,6 +71,9 @@ type Stmt struct {
 	To     *Expr  `json:"to,omitempty"`
 	By     *Expr  `json:"by,omitempty"`
 	ForIn  *Expr  `json:"for_in,omitempty"`
+	// ForVar2/ForTuple: tuple for-in ("for [index, value] in arr"), Pine v5.
+	ForVar2   string `json:"for_var2,omitempty"`
+	ForTuple  bool   `json:"for_tuple,omitempty"`
 
 	Func *FunctionDef `json:"func,omitempty"`
 	Type *TypeDef     `json:"type,omitempty"`

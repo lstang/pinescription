@@ -126,6 +126,7 @@ type Engine struct {
 	cachedBytecode   []byte
 	cachedProgram    Program
 	cacheValid       bool
+	execBudget       time.Duration
 }
 
 // AlertEvent describes an alert triggered by a Pine Script alert() call during execution.
@@ -245,23 +246,24 @@ func isImplementedBuiltinFunctionName(name string) bool {
 }
 
 var implementedBuiltinFunctionNames = map[string]struct{}{
-	"int": {}, "float": {}, "bool": {}, "string": {}, "str.tostring": {},
+	"int": {}, "float": {}, "bool": {}, "string": {}, "str.tostring": {}, "tostring": {},
 	"input.time": {}, "input.session": {}, "input.symbol": {},
 	"alertcondition": {}, "color": {}, "color.rgb": {}, "color.from_gradient": {},
 	"box.get_bottom": {}, "box.get_top": {}, "box.set_right": {}, "box.delete": {},
 	"linefill.new": {}, "line.new": {}, "label.new": {}, "label.delete": {}, "polyline.new": {}, "polyline.delete": {}, "chart.point.from_index": {}, "line.set_xy1": {}, "line.set_xy2": {}, "line.set_color": {},
 	"label.set_xy": {}, "label.set_text": {}, "label.set_tooltip": {},
 	"table.clear": {}, "table.merge_cells": {},
-	"log.info": {}, "log.warning": {}, "log.error": {},
+	"log.info": {}, "log.warning": {}, "log.error": {}, "log": {},
 	"map.new": {}, "map.clear": {}, "map.copy": {}, "map.size": {}, "map.put": {}, "map.get": {}, "map.contains": {}, "map.remove": {}, "map.keys": {}, "map.values": {},
 	"array.new_int": {}, "array.new_float": {}, "array.new_bool": {}, "array.new_string": {}, "array.new_box": {}, "array.new_label": {}, "array.new_polyline": {}, "array.new_chart_point": {},
-	"array.size": {}, "array.get": {}, "array.set": {}, "array.push": {}, "array.pop": {}, "array.unshift": {}, "array.shift": {}, "array.clear": {}, "array.remove": {}, "array.concat": {}, "array.slice": {}, "array.includes": {}, "array.indexof": {}, "array.lastindexof": {}, "array.copy": {}, "array.from": {}, "array.insert": {}, "array.first": {}, "array.last": {}, "array.join": {}, "array.every": {}, "array.abs": {}, "array.sum": {}, "array.avg": {}, "array.max": {}, "array.min": {}, "array.range": {}, "array.median": {}, "array.mode": {}, "array.percentrank": {}, "array.percentile_linear_interpolation": {}, "array.percentile_nearest_rank": {}, "array.percentile_neareast_rank": {}, "array.binary_search_leftmost": {}, "array.binary_search_rightmost": {}, "array.covariance": {},
+	"array.size": {}, "array.get": {}, "array.set": {}, "array.push": {}, "array.pop": {}, "array.unshift": {}, "array.shift": {}, "array.clear": {}, "array.remove": {}, "array.concat": {}, "array.slice": {}, "array.includes": {}, "array.indexof": {}, "array.lastindexof": {}, "array.copy": {}, "array.from": {}, "array.insert": {}, "array.first": {}, "array.last": {}, "array.join": {}, "array.every": {}, "array.abs": {}, "array.sum": {}, "array.avg": {}, "array.max": {}, "array.min": {}, "array.range": {}, "array.median": {}, "array.mode": {}, "array.percentrank": {}, "array.percentile_linear_interpolation": {}, "array.percentile_nearest_rank": {}, "array.percentile_neareast_rank": {}, "array.binary_search_leftmost": {}, "array.binary_search_rightmost": {}, "array.covariance": {}, "array.sort": {}, "array.sort_indices": {},
 	"str.length": {}, "str.upper": {}, "str.lower": {}, "str.contains": {}, "str.startswith": {}, "str.endswith": {}, "str.replace": {}, "str.substring": {}, "str.split": {}, "str.format": {},
 	"na": {}, "fixnan": {},
 	"math.abs": {}, "abs": {}, "math.round": {}, "round": {}, "math.floor": {}, "floor": {}, "math.ceil": {}, "ceil": {}, "math.pow": {}, "pow": {}, "math.sqrt": {}, "sqrt": {}, "math.log10": {}, "log10": {}, "math.avg": {}, "avg": {}, "math.sum": {}, "sum": {}, "math.exp": {}, "exp": {}, "math.sin": {}, "sin": {}, "math.cos": {}, "cos": {}, "math.tan": {}, "tan": {}, "math.acos": {}, "acos": {}, "math.asin": {}, "asin": {}, "math.atan": {}, "atan": {}, "math.sign": {}, "sign": {}, "math.todegrees": {}, "todegrees": {}, "math.toradians": {}, "toradians": {}, "math.random": {},
 	"timeframe.change": {}, "timeframe.in_seconds": {}, "timeframe.from_seconds": {}, "time": {}, "time_close": {}, "timenow": {}, "time_tradingday": {}, "timestamp": {},
+	"year": {}, "month": {}, "dayofmonth": {}, "dayofweek": {}, "hour": {}, "minute": {}, "second": {}, "weekofyear": {}, "weekofmonth": {},
 	"value_of": {}, "close_of": {}, "open_of": {}, "high_of": {}, "low_of": {},
-	"atr": {}, "ta.atr": {}, "change": {}, "ta.change": {}, "stdev": {}, "ta.stdev": {}, "correlation": {}, "ta.correlation": {}, "sma": {}, "ta.sma": {}, "ema": {}, "ta.ema": {}, "rsi": {}, "ta.rsi": {}, "crossover": {}, "ta.crossover": {}, "crossunder": {}, "ta.crossunder": {}, "cross": {}, "ta.cross": {}, "rma": {}, "ta.rma": {}, "wma": {}, "ta.wma": {}, "swma": {}, "ta.swma": {}, "hma": {}, "ta.hma": {}, "alma": {}, "ta.alma": {}, "linreg": {}, "ta.linreg": {}, "vwma": {}, "ta.vwma": {}, "cci": {}, "ta.cci": {}, "cmo": {}, "ta.cmo": {}, "cog": {}, "ta.cog": {}, "macd": {}, "ta.macd": {}, "mom": {}, "ta.mom": {}, "roc": {}, "ta.roc": {}, "barssince": {}, "ta.barssince": {}, "cum": {}, "ta.cum": {}, "valuewhen": {}, "ta.valuewhen": {}, "highestbars": {}, "ta.highestbars": {}, "lowestbars": {}, "ta.lowestbars": {}, "ta.max": {}, "ta.min": {}, "ta.median": {}, "ta.mode": {}, "ta.percentile_linear_interpolation": {}, "ta.percentile_nearest_rank": {}, "ta.percentrank": {}, "ta.range": {}, "ta.variance": {}, "ta.dev": {}, "ta.rising": {}, "ta.falling": {}, "tr": {}, "ta.tr": {}, "ta.pivothigh": {}, "ta.pivotlow": {}, "ta.pivot_point_levels": {}, "bb": {}, "ta.bb": {}, "bbw": {}, "ta.bbw": {}, "kc": {}, "ta.kc": {}, "kcw": {}, "ta.kcw": {}, "stoch": {}, "ta.stoch": {}, "mfi": {}, "ta.mfi": {}, "tsi": {}, "ta.tsi": {}, "wpr": {}, "ta.wpr": {}, "dmi": {}, "ta.dmi": {}, "sar": {}, "ta.sar": {}, "supertrend": {}, "ta.supertrend": {}, "sma_of": {}, "ema_of": {}, "rsi_of": {},
+	"atr": {}, "ta.atr": {}, "change": {}, "ta.change": {}, "stdev": {}, "ta.stdev": {}, "correlation": {}, "ta.correlation": {}, "sma": {}, "ta.sma": {}, "ema": {}, "ta.ema": {}, "rsi": {}, "ta.rsi": {}, "crossover": {}, "ta.crossover": {}, "crossunder": {}, "ta.crossunder": {}, "cross": {}, "ta.cross": {}, "rma": {}, "ta.rma": {}, "wma": {}, "ta.wma": {}, "swma": {}, "ta.swma": {}, "hma": {}, "ta.hma": {}, "alma": {}, "ta.alma": {}, "linreg": {}, "ta.linreg": {}, "vwma": {}, "ta.vwma": {}, "cci": {}, "ta.cci": {}, "cmo": {}, "ta.cmo": {}, "cog": {}, "ta.cog": {}, "macd": {}, "ta.macd": {}, "mom": {}, "ta.mom": {}, "roc": {}, "ta.roc": {}, "barssince": {}, "ta.barssince": {}, "cum": {}, "ta.cum": {}, "valuewhen": {}, "ta.valuewhen": {}, "highestbars": {}, "ta.highestbars": {}, "lowestbars": {}, "ta.lowestbars": {}, "ta.max": {}, "ta.min": {}, "ta.median": {}, "ta.mode": {}, "ta.percentile_linear_interpolation": {}, "ta.percentile_nearest_rank": {}, "ta.percentrank": {}, "percentrank": {}, "ta.range": {}, "ta.variance": {}, "ta.dev": {}, "ta.rising": {}, "ta.falling": {}, "tr": {}, "ta.tr": {}, "ta.pivothigh": {}, "ta.pivotlow": {}, "ta.pivot_point_levels": {}, "bb": {}, "ta.bb": {}, "bbw": {}, "ta.bbw": {}, "kc": {}, "ta.kc": {}, "kcw": {}, "ta.kcw": {}, "stoch": {}, "ta.stoch": {}, "mfi": {}, "ta.mfi": {}, "tsi": {}, "ta.tsi": {}, "wpr": {}, "ta.wpr": {}, "dmi": {}, "ta.dmi": {}, "sar": {}, "ta.sar": {}, "supertrend": {}, "ta.supertrend": {}, "sma_of": {}, "ema_of": {}, "rsi_of": {},
 }
 
 // RegisterMarketDataProvider adds a market data provider to the engine.
@@ -693,6 +695,27 @@ func (e *Engine) Execute(bytecode []byte) (interface{}, error) {
 // After this call, Runtime returns the same Runtime until the next Execute or
 // ClearRuntime. The caller must not mutate the returned Runtime.
 func (e *Engine) ExecuteWithRuntime(bytecode []byte) (*Runtime, interface{}, error) {
+	return e.execute(bytecode, nil)
+}
+
+// ExecuteStepped is like ExecuteWithRuntime but invokes step after each bar is
+// committed, passing the 0-based index of the bar that just finished. This lets
+// hosts react to per-bar events produced by registered functions (for example,
+// simulating strategy order placement) between bars rather than only after the
+// whole run completes. Returning a non-nil error from step aborts execution
+// with that error; the partially-built Runtime is not retained as the engine's
+// latest runtime in that case.
+func (e *Engine) ExecuteStepped(bytecode []byte, step func(barIdx int) error) (*Runtime, interface{}, error) {
+	return e.execute(bytecode, step)
+}
+
+// SetExecBudget caps a single Execute/ExecuteStepped run at d of wall-clock
+// time. Once exceeded, execution aborts with a "execution budget exceeded"
+// error so hosts can bound pathological scripts instead of hanging forever.
+// Zero (the default) disables the budget.
+func (e *Engine) SetExecBudget(d time.Duration) { e.execBudget = d }
+
+func (e *Engine) execute(bytecode []byte, step func(barIdx int) error) (*Runtime, interface{}, error) {
 	program, err := e.decodeProgramCached(bytecode)
 	if err != nil {
 		return nil, nil, err
@@ -765,6 +788,10 @@ func (e *Engine) ExecuteWithRuntime(bytecode []byte) (*Runtime, interface{}, err
 		seriesByKey[key] = ser
 	}
 
+	deadline := time.Time{}
+	if e.execBudget > 0 {
+		deadline = time.Now().Add(e.execBudget)
+	}
 	for i := 0; i < baseSeries.Length(); i++ {
 		rt.SetBarIndex(i)
 		if err := rt.execTopLevel(); err != nil {
@@ -772,6 +799,14 @@ func (e *Engine) ExecuteWithRuntime(bytecode []byte) (*Runtime, interface{}, err
 		}
 		if err := rt.commitBar(); err != nil {
 			return nil, nil, err
+		}
+		if step != nil {
+			if err := step(i); err != nil {
+				return nil, nil, err
+			}
+		}
+		if !deadline.IsZero() && (i%64 == 63) && time.Now().After(deadline) {
+			return nil, nil, fmt.Errorf("execution budget exceeded (%v) at bar %d/%d", e.execBudget, i+1, baseSeries.Length())
 		}
 	}
 

@@ -7,6 +7,8 @@ package pinescription
 import (
 	"math"
 	"time"
+
+	wseries "github.com/woodstock-tokyo/pinescription/series"
 )
 
 // Release returns all internal memory held by the Runtime to the object pools.
@@ -24,6 +26,7 @@ func (r *Runtime) Release() {
 	r.namedSeries = nil
 	r.seriesExprByName = nil
 	r.seriesExprResolving = nil
+	r.seriesExprCache = nil
 	r.indicatorState = nil
 	r.extremaState = nil
 	r.valueTypesBySymbol = nil
@@ -99,6 +102,7 @@ func newRuntime(
 		namedSeries:         map[string]SeriesExtended{},
 		seriesExprByName:    map[string]*Expr{},
 		seriesExprResolving: map[string]bool{},
+		seriesExprCache:     map[*Expr]*wseries.Queue{},
 		indicatorState:      map[string]interface{}{},
 		extremaState:        map[extremaStateKey]*extremaIndicatorState{},
 		valueTypesBySymbol:  valueTypesBySymbol,

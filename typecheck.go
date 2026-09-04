@@ -51,8 +51,17 @@ func validateNoNumericToBoolAutoConversion(program *Program) error {
 
 	for _, fn := range program.Functions {
 		fnEnv := newStaticTypeEnv()
+		// Seed the function env with global types ONLY for names the function
+		// does not declare locally: at runtime a function-local assignment
+		// ("down = crossunder(...)") creates a fresh frame entry that shadows
+		// the global, so a global numeric type must not poison the local. The
+		// runtime treats every decl/assign inside a function as frame-local.
+		localNames := map[string]bool{}
+		collectLocalDeclNames(fn.Body, localNames)
 		for name, typ := range env.vars {
-			fnEnv.vars[name] = typ
+			if !localNames[name] {
+				fnEnv.vars[name] = typ
+			}
 		}
 		for _, p := range fn.Params {
 			fnEnv.set(p, staticTypeUnknown)
@@ -73,6 +82,30 @@ func validateNoNumericToBoolAutoConversion(program *Program) error {
 	}
 
 	return nil
+}
+
+// collectLocalDeclNames walks a statement list and records every name that
+// is declared or assigned within it (recursing into nested bodies), so a
+// function's locals can be excluded from the seeded global type environment.
+func collectLocalDeclNames(stmts []Stmt, into map[string]bool) {
+	for _, stmt := range stmts {
+		switch stmt.Kind {
+		case "decl", "assign":
+			into[stmt.Name] = true
+		case "if":
+			collectLocalDeclNames(stmt.Then, into)
+			collectLocalDeclNames(stmt.Else, into)
+		case "for", "forin":
+			collectLocalDeclNames(stmt.Body, into)
+		case "while":
+			collectLocalDeclNames(stmt.Body, into)
+		case "switch":
+			for _, c := range stmt.Cases {
+				collectLocalDeclNames(c.Body, into)
+			}
+			collectLocalDeclNames(stmt.Default, into)
+		}
+	}
 }
 
 func validateStmtListNoNumericToBool(stmts []Stmt, env *staticTypeEnv) error {
@@ -113,6 +146,16 @@ func validateStmtNoNumericToBool(stmt Stmt, env *staticTypeEnv) error {
 			return err
 		}
 		if declared, ok := env.get(stmt.Name); ok {
+			if declared == staticTypeUnknown {
+				// An assignment (not a decl) to an unknown-typed name infers its
+				// type here. That is correct for a true first declaration, but
+				// WRONG when the global env was seeded with a numeric type from
+				// a same-named variable and the function actually re-assigns a
+				// LOCAL first ("down = crossunder(...)" after a global numeric
+				// "down") — the local assignment shadowed the global at runtime,
+				// so the local type wins and must not be poisoned by the seed.
+				// Covered by the general unknown handling below.
+			}
 			if declared == staticTypeBool && inferred == staticTypeNumber {
 				return fmt.Errorf("cannot assign int/float expression to bool variable %s", stmt.Name)
 			}
@@ -161,6 +204,8 @@ func validateStmtNoNumericToBool(stmt Stmt, env *staticTypeEnv) error {
 			return err
 		}
 		return validateStmtListNoNumericToBool(stmt.Body, env)
+	case "block":
+		return validateStmtListNoNumericToBool(stmt.Body, env)
 	case "switch":
 		if stmt.SwitchExpr != nil {
 			if _, err := validateExprNoNumericToBool(stmt.SwitchExpr, env); err != nil {
@@ -191,13 +236,14 @@ func validateStmtNoNumericToBool(stmt Stmt, env *staticTypeEnv) error {
 }
 
 func ensureBoolContextNoNumeric(expr *Expr, env *staticTypeEnv, context string) error {
-	typ, err := validateExprNoNumericToBool(expr, env)
+	_, err := validateExprNoNumericToBool(expr, env)
 	if err != nil {
 		return err
 	}
-	if typ == staticTypeNumber {
-		return fmt.Errorf("cannot use int/float expression as bool in %s", context)
-	}
+	// The runtime evaluates boolean contexts with truthy(), which accepts
+	// numeric series (non-zero/non-NaN is true). Legacy (v2-v4) Pine scripts
+	// rely on this implicit numeric-to-bool conversion, so numbers are
+	// permitted here rather than rejected.
 	return nil
 }
 
@@ -232,15 +278,11 @@ func validateExprNoNumericToBool(expr *Expr, env *staticTypeEnv) (staticExprType
 			return staticTypeUnknown, nil
 		}
 	case "unary":
-		rightType, err := validateExprNoNumericToBool(expr.Right, env)
-		if err != nil {
+		if _, err := validateExprNoNumericToBool(expr.Right, env); err != nil {
 			return staticTypeUnknown, err
 		}
 		switch expr.Op {
 		case "not":
-			if rightType == staticTypeNumber {
-				return staticTypeBool, fmt.Errorf("cannot use int/float expression as bool in not expression")
-			}
 			return staticTypeBool, nil
 		case "+", "-":
 			return staticTypeNumber, nil
@@ -258,9 +300,7 @@ func validateExprNoNumericToBool(expr *Expr, env *staticTypeEnv) (staticExprType
 		}
 		switch expr.Op {
 		case "and", "or":
-			if leftType == staticTypeNumber || rightType == staticTypeNumber {
-				return staticTypeBool, fmt.Errorf("cannot use int/float expression as bool in logical expression")
-			}
+			// numeric operands are fine: truthy() handles them at runtime
 			return staticTypeBool, nil
 		case "==", "!=", "<", "<=", ">", ">=":
 			return staticTypeBool, nil
@@ -273,12 +313,9 @@ func validateExprNoNumericToBool(expr *Expr, env *staticTypeEnv) (staticExprType
 			return staticTypeUnknown, nil
 		}
 	case "ternary":
-		condType, err := validateExprNoNumericToBool(expr.Left, env)
+		_, err := validateExprNoNumericToBool(expr.Left, env)
 		if err != nil {
 			return staticTypeUnknown, err
-		}
-		if condType == staticTypeNumber {
-			return staticTypeUnknown, fmt.Errorf("cannot use int/float expression as bool in ternary condition")
 		}
 		whenTrueType, err := validateExprNoNumericToBool(expr.Right, env)
 		if err != nil {

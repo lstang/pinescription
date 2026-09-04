@@ -37,3 +37,6 @@ AGENTS.md
 # Editor/IDE
 # .idea/
 # .vscode/
+scratch/
+backtest/__pycache__/
+backtest/*.pine

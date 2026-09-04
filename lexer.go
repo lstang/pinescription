@@ -5,6 +5,7 @@
 package pinescription
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -165,6 +166,12 @@ func lexLine(line string, lineNum int) ([]token, error) {
 			var err error
 			if quote == '"' {
 				v, err = strconv.Unquote(lit)
+				if err != nil {
+					// Pine source extracted from web pages often carries markdown
+					// escapes like "\$" that Go's Unquote rejects. Fall back to a
+					// lenient unescape instead of failing the whole compile.
+					v, err = lenientUnquoteString(lit)
+				}
 			} else {
 				v, err = unescapeSingleQuotedString(lit)
 			}
@@ -206,6 +213,19 @@ func lexLine(line string, lineNum int) ([]token, error) {
 					break
 				}
 				j++
+			}
+			// scientific notation: 1e10, 1.5E-7, 3e+2 (Pine accepts these)
+			if j < len(line) && (line[j] == 'e' || line[j] == 'E') {
+				k := j + 1
+				if k < len(line) && (line[k] == '+' || line[k] == '-') {
+					k++
+				}
+				if k < len(line) && isDigit(line[k]) {
+					for k < len(line) && isDigit(line[k]) {
+						k++
+					}
+					j = k
+				}
 			}
 			out = append(out, token{Typ: tokNumber, Text: line[i:j], Line: lineNum, Col: i + 1})
 			i = j
@@ -320,6 +340,49 @@ func isDigit(ch byte) bool {
 
 func isHexDigit(ch byte) bool {
 	return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')
+}
+
+// lenientUnquoteString is a fallback for string literals that Go's
+// strconv.Unquote rejects (e.g. markdown-escaped "\$" in scraped sources).
+// It interprets the standard escapes it knows and copies unknown escape
+// sequences through verbatim (dropping the backslash, which is what Pine's
+// lenient lexer effectively does for "\$").
+func lenientUnquoteString(lit string) (string, error) {
+	if len(lit) < 2 || lit[0] != '"' || lit[len(lit)-1] != '"' {
+		return "", errors.New("invalid syntax")
+	}
+	body := lit[1 : len(lit)-1]
+	var b strings.Builder
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if c != '\\' || i+1 >= len(body) {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		switch body[i] {
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case '\\':
+			b.WriteByte('\\')
+		case '"':
+			b.WriteByte('"')
+		case '\'':
+			b.WriteByte('\'')
+		case 'x', 'u', 'U':
+			// leave unicode/byte escapes to a plain copy (rare in practice)
+			b.WriteByte('\\')
+			b.WriteByte(body[i])
+		default:
+			// unknown escape (\$, \{, ...): drop the backslash
+			b.WriteByte(body[i])
+		}
+	}
+	return b.String(), nil
 }
 
 func unescapeSingleQuotedString(lit string) (string, error) {

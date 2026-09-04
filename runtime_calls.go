@@ -11,6 +11,16 @@ import (
 	"strings"
 )
 
+// builtinNameAliases maps legacy bare builtin names to their ta.* namespaced
+// forms. Consulted when the primary builtin lookup misses.
+var builtinNameAliases = map[string]string{
+	"pivotlow":  "ta.pivotlow",
+	"pivothigh": "ta.pivothigh",
+	"obv":       "ta.obv",
+	"vwap":      "ta.vwap",
+	"tr":        "ta.tr",
+}
+
 func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 	if expr.Left == nil || expr.Left.KOp != exprKindIdent {
 		return nil, errors.New("call target must be identifier")
@@ -31,6 +41,8 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 		}
 	}
 	if callHasNamedArgs(expr.Args) {
+		// A script-defined function with a param list binds named args via its
+		// own spec; builtins/specs are checked inside bindNamedCallArgs.
 		if !r.hasCallParamSpec(name) {
 			if v, ok, err := r.callRegisteredFunction(name, expr.Args); ok || err != nil {
 				return v, err
@@ -54,6 +66,16 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 		}
 	}
 
+	// Script-defined functions shadow same-named builtins in Pine: a script
+	// that declares "wma(price, len, weight) =>" or "rsi(source) =>" or
+	// "kc() =>" expects ITS implementation to be called, not the ta builtin
+	// (whose arg-count check would otherwise reject the call). Check program
+	// functions first; fall back to the builtin only when no local function
+	// of that name exists.
+	if fn, ok := r.program.Functions[name]; ok {
+		result, err := r.callScriptFunction(fn, rawArgs, args)
+		return result, err
+	}
 	if expr.BID != builtinFastUnknown {
 		if v, ok, err := r.callBuiltinFast(expr.BID, rawArgs, args); ok || err != nil {
 			return v, err
@@ -75,6 +97,14 @@ func (r *Runtime) evalCall(expr *Expr) (interface{}, error) {
 	}
 	if userFn, ok := r.userFns[name]; ok {
 		return r.invokeRegisteredFunction(userFn, args, useArgPool)
+	}
+	// v3 bare-name aliases for builtins only exposed under ta.* (the
+	// preprocessor rewrites most bare forms, but some scripts slip past it,
+	// e.g. pivotlow used inside a guard-skipped context).
+	if mapped, ok := builtinNameAliases[name]; ok {
+		if v, ok2, err := r.callBuiltin(mapped, rawArgs, args); ok2 || err != nil {
+			return v, err
+		}
 	}
 	if recvName, methodName, ok := splitMethodCallName(name); ok {
 		recv, err := r.resolve(recvName)
@@ -319,12 +349,23 @@ func bindNamedCallArgs(name string, argExprs []*Expr, spec callParamSpec) ([]*Ex
 	for _, arg := range argExprs {
 		if arg != nil && arg.Kind == "named_arg" {
 			idx := spec.indexOf(arg.Name)
-			if idx < 0 {
-				return nil, fmt.Errorf("unknown named argument %q for %s", arg.Name, name)
-			}
-			if assigned[idx] {
-				return nil, fmt.Errorf("duplicate argument %q for %s", arg.Name, name)
-			}
+		if idx < 0 {
+			// Unknown named arguments are pervasive in converted sources
+			// (typos like "tranps=", v5-only args, stale docs args) and
+			// only ever carry cosmetic values for the plotting/decl hooks.
+			// Drop them unconditionally: a fuzzy "close" miss (e.g. the typo
+			// "trasp" for transp) used to fail whole scripts that would
+			// otherwise backtest fine, and a dropped cosmetic arg never
+			// changes trade decisions.
+			_ = fuzzyNamedArgIndex(spec, arg.Name)
+			continue
+		}
+		if assigned[idx] {
+			// A named argument that duplicates an earlier positional or named
+			// binding (e.g. input(40, defval=40)) is common in converted v3/v4
+			// sources; keep the first binding instead of failing the script.
+			continue
+		}
 			bound[idx] = arg.NamedArgValue()
 			assigned[idx] = true
 			if idx > highestAssigned {
@@ -355,6 +396,63 @@ func bindNamedCallArgs(name string, argExprs []*Expr, spec callParamSpec) ([]*Ex
 		}
 	}
 	return bound, nil
+}
+
+// fuzzyNamedArgIndex reports a spec slot that the unknown argument name
+// plausibly meant (Levenshtein-style single-edit match, or a prefix of a
+// spec name). Returns -1 when the name is not close to any parameter. Only
+// genuinely misspelled variants of real parameters get the strict error;
+// everything else is silently dropped by the caller.
+func fuzzyNamedArgIndex(spec callParamSpec, name string) int {
+	best, bestDist := -1, 999
+	for i, n := range spec.Names {
+		d := editDistance(lowerASCII(n), lowerASCII(name))
+		if d < bestDist {
+			best, bestDist = i, d
+		}
+	}
+	if best >= 0 && bestDist <= 1 {
+		return best
+	}
+	return -1
+}
+
+func lowerASCII(s string) string {
+	b := []byte(s)
+	for i := range b {
+		if b[i] >= 'A' && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+func editDistance(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	cur := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			m := prev[j] + 1
+			if cur[j-1]+1 < m {
+				m = cur[j-1] + 1
+			}
+			if prev[j-1]+cost < m {
+				m = prev[j-1] + cost
+			}
+			cur[j] = m
+		}
+		prev, cur = cur, prev
+	}
+	return prev[len(rb)]
 }
 
 func (r *Runtime) callParamSpec(name string) (callParamSpec, bool) {

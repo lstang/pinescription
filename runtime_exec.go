@@ -153,6 +153,8 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 		return r.execStmtList(block)
 	case "switch":
 		return r.execSwitch(stmt)
+	case "block":
+		return r.execStmtList(stmt.Body)
 	case "while":
 		var last interface{}
 		hasLast := false
@@ -207,6 +209,9 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 			if r.consts[stmt.ForVar] {
 				return flow{}, fmt.Errorf("cannot assign const variable %s", stmt.ForVar)
 			}
+			if stmt.ForTuple && stmt.ForVar2 != "" && r.consts[stmt.ForVar2] {
+				return flow{}, fmt.Errorf("cannot assign const variable %s", stmt.ForVar2)
+			}
 			prevValue, hadPrev := scope[stmt.ForVar]
 			defer func() {
 				if hadPrev {
@@ -215,13 +220,28 @@ func (r *Runtime) execStmt(stmt Stmt) (flow, error) {
 					delete(scope, stmt.ForVar)
 				}
 			}()
+			if stmt.ForTuple && stmt.ForVar2 != "" {
+				prevValue2, hadPrev2 := scope[stmt.ForVar2]
+				defer func() {
+					if hadPrev2 {
+						scope[stmt.ForVar2] = prevValue2
+					} else {
+						delete(scope, stmt.ForVar2)
+					}
+				}()
+			}
 			var last interface{}
 			hasLast := false
 			for idx, item := range items {
 				if idx >= maxLoopIterations {
 					return flow{}, fmt.Errorf("loop iteration limit exceeded: %d", maxLoopIterations)
 				}
-				scope[stmt.ForVar] = item
+				if stmt.ForTuple && stmt.ForVar2 != "" {
+					scope[stmt.ForVar] = float64(idx)
+					scope[stmt.ForVar2] = item
+				} else {
+					scope[stmt.ForVar] = item
+				}
 				fl, err := r.execStmtList(stmt.Body)
 				if err != nil {
 					return flow{}, err
@@ -484,6 +504,14 @@ func (r *Runtime) eval(expr *Expr) (interface{}, error) {
 	if expr == nil {
 		return nil, nil
 	}
+	// Safety net: pathological nesting (self-referential index exprs) must
+	// fail the script, not overflow the goroutine stack and kill the process.
+	r.evalDepth++
+	if r.evalDepth > 5000 {
+		r.evalDepth--
+		return nil, errors.New("expression evaluation depth exceeded (possible self-referential expression)")
+	}
+	defer func() { r.evalDepth-- }()
 	switch expr.KOp {
 	case exprKindNumber:
 		return expr.Number, nil
@@ -624,7 +652,9 @@ func (r *Runtime) evalWithOffset(expr *Expr, offset int) (interface{}, error) {
 
 func (r *Runtime) evalIndex(left *Expr, idx int) (interface{}, error) {
 	if idx < 0 {
-		return nil, errors.New("negative index")
+		// Variable history offsets (x[lbars] with lbars an input) can evaluate
+		// negative at early bars; treat like na instead of failing the script.
+		return math.NaN(), nil
 	}
 	if left == nil {
 		return nil, errors.New("index target is nil")
@@ -635,11 +665,20 @@ func (r *Runtime) evalIndex(left *Expr, idx int) (interface{}, error) {
 		if idx == 0 {
 			return r.resolve(name)
 		}
-		if raw, ok := r.lookupAssignedValue(name); ok {
-			if arg, ok := raw.(seriesArgument); ok && arg.expr != nil {
-				return r.evalWithOffset(arg.expr, idx)
+		if !r.historyResolving[name] {
+			if raw, ok := r.lookupAssignedValue(name); ok {
+				if arg, ok := raw.(seriesArgument); ok && arg.expr != nil {
+					if r.historyResolving == nil {
+						r.historyResolving = map[string]bool{}
+					}
+					r.historyResolving[name] = true
+					v, err := r.evalWithOffset(arg.expr, idx)
+					delete(r.historyResolving, name)
+					return v, err
+				}
 			}
 		}
+		// Re-entrant self-referential lookup or plain history access.
 		if isPriceIdentifierName(name) {
 			return r.valueAt(r.activeSymbol, name, r.evalOffset+idx), nil
 		}
@@ -812,16 +851,18 @@ func evalBinaryByOpcode(op uint8, lv interface{}, rv interface{}) (interface{}, 
 
 func indexValue(v interface{}, idx int, bar int) (interface{}, error) {
 	if idx < 0 {
-		return nil, errors.New("negative index")
+		return math.NaN(), nil
 	}
 	switch arr := v.(type) {
 	case []interface{}:
 		if idx >= len(arr) {
-			return nil, fmt.Errorf("index out of range: %d", idx)
+			// Out-of-range series/index reads are na in Pine; failing the whole
+			// backtest for a speculative read is worse than approximating.
+			return math.NaN(), nil
 		}
 		return arr[idx], nil
 	default:
-		return nil, fmt.Errorf("value is not indexable at bar %d", bar)
+		return math.NaN(), nil
 	}
 }
 

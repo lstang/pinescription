@@ -24,8 +24,32 @@ func defDecl() DeclConfig {
 		QtyType:        "percent_of_equity",
 		QtyValue:       100,
 		InitialCapital: 10000,
+		// Realistic default costs. The script's strategy() declaration
+		// overrides these when it declares commission/slippage itself.
 		CommissionType: "percent",
+		CommissionValue: defaultCommissionPct,
+		Slippage:        defaultSlippageBps / 10000.0,
 	}
+}
+
+// Realistic retail-ish trading costs applied when the strategy does not
+// declare its own: 0.05% commission per fill (percent of notional) and
+// 2 basis points of slippage per fill.
+const (
+	defaultCommissionPct = 0.05
+	defaultSlippageBps   = 2.0
+)
+
+// applySlippage shifts a fill price against the trader: buys fill higher,
+// sells fill lower, by Decl.Slippage (fraction of price).
+func (s *Sim) applySlippage(price float64, buying bool) float64 {
+	if s.Decl.Slippage <= 0 || price <= 0 {
+		return price
+	}
+	if buying {
+		return price * (1 + s.Decl.Slippage)
+	}
+	return price * (1 - s.Decl.Slippage)
 }
 
 // Intent is an order request captured from a strategy.* call during a bar's
@@ -66,6 +90,7 @@ type CondOrder struct {
 	TrailOff  float64
 	OCA       string
 	FromBar   int
+	Armed     bool // exit order has seen its entry position at least once
 }
 
 // Position tracks one entry id's open quantity.
@@ -263,23 +288,23 @@ func (s *Sim) qtyForEntry(id string) float64 {
 }
 
 // declareCond converts a strategy.exit intent into a resting conditional order.
+// The order is queued even when the referenced entry has not filled yet (the
+// common same-bar strategy.entry + strategy.exit pattern): it arms once the
+// position exists. Qty is resolved at arming time when not specified.
 func (s *Sim) declareCond(it Intent) bool {
-	q := it.Qty
-	if q == 0 {
-		q = math.Abs(s.qtyForEntry(it.EntryID))
-	}
-	if q <= 0 {
-		return true
-	}
 	hasSL := it.Stop > 0 || it.Loss > 0
 	hasTP := it.Limit > 0 || it.Profit > 0
 	hasTrail := it.TrailPts > 0 || it.TrailOff > 0
 	if !hasSL && !hasTP && !hasTrail {
 		return false // plain market exit handled by caller
 	}
+	// Re-declaring an exit with the same id modifies the resting order
+	// (TradingView semantics). Without the dedup, stale stops from earlier
+	// bars accumulate and the loosest (often outdated) level governs exits.
+	s.pendingCond = dropCond(s.pendingCond, it.ID)
 	s.pendingCond = append(s.pendingCond, CondOrder{
 		Seq: it.Seq, Kind: "exit", ID: it.ID, EntryID: it.EntryID,
-		Qty: q, Stop: it.Stop, Limit: it.Limit, Profit: it.Profit, Loss: it.Loss,
+		Qty: it.Qty, Stop: it.Stop, Limit: it.Limit, Profit: it.Profit, Loss: it.Loss,
 		TrailPts: it.TrailPts, TrailOff: it.TrailOff, FromBar: it.Bar,
 	})
 	return true
@@ -319,10 +344,25 @@ func negateDir(d float64) int {
 	return 0
 }
 
-// fillMarketOrders fills queued market orders (from the previous bar) at the
-// current bar's open.
+// fillMarketOrders fills queued market orders at the current bar. Orders
+// submitted during bar b's script evaluation are deferred to bar b+1: the
+// signal is derived from bar b's close, so filling on bar b's own open is
+// same-bar look-ahead bias that massively inflates backtest returns.
 func (s *Sim) fillMarketOrders(b int) {
 	if len(s.pendingMarket) == 0 {
+		return
+	}
+	// Split the queue: only orders from earlier bars may fill on this bar.
+	var ready, deferred []Intent
+	for _, it := range s.pendingMarket {
+		if it.Bar < b {
+			ready = append(ready, it)
+		} else {
+			deferred = append(deferred, it)
+		}
+	}
+	s.pendingMarket = deferred
+	if len(ready) == 0 {
 		return
 	}
 	bar := s.Bars[b]
@@ -333,8 +373,7 @@ func (s *Sim) fillMarketOrders(b int) {
 	} else {
 		fillPrice = bar.O
 	}
-	orders := s.pendingMarket
-	s.pendingMarket = nil
+	orders := ready
 	for _, it := range orders {
 		if !it.When {
 			continue
@@ -356,18 +395,52 @@ func (s *Sim) fillMarketOrders(b int) {
 	}
 }
 
-func (s *Sim) executeEntry(it Intent, dir int, price float64, b int) {
-	// pyramiding check: default 0 => cannot add in same direction
-	if s.Decl.Pyramiding <= 0 && math.Abs(s.PositionSize()) > 1e-12 {
-		cur := signOf(s.PositionSize())
-		if dir == cur {
-			return // no pyramiding, ignore add
+// sameDirEntryCount counts open entry positions signed in `dir`.
+func (s *Sim) sameDirEntryCount(dir int) int {
+	n := 0
+	for _, p := range s.positions {
+		if math.Abs(p.Qty) > 1e-12 && signOf(p.Qty) == dir {
+			n++
 		}
-		// reverse: close existing, then open opposite
-		s.closeAllAt(price, b, "reverse")
 	}
+	return n
+}
+
+func (s *Sim) executeEntry(it Intent, dir int, price float64, b int) {
 	if price <= 0 {
 		return
+	}
+	cur := signOf(s.PositionSize())
+	if it.Kind == "order" {
+		// strategy.order keeps the legacy guard: without pyramiding declared,
+		// same-direction orders are ignored and opposite orders reverse.
+		if s.Decl.Pyramiding <= 0 && cur != 0 {
+			if dir == cur {
+				return
+			}
+			s.closeAllAt(price, b, "reverse")
+		}
+	} else {
+		// strategy.entry TV semantics:
+		//  - an entry whose ID matches an already-open entry position is ignored;
+		//  - same-direction adds are capped by `pyramiding` (0 or 1 => one entry);
+		//  - an opposite-direction entry reverses: close existing, open new.
+		if cur != 0 {
+			if dir == cur {
+				if p := s.positions[it.ID]; p != nil && signOf(p.Qty) == dir {
+					return
+				}
+				limit := s.Decl.Pyramiding
+				if limit < 1 {
+					limit = 1
+				}
+				if s.sameDirEntryCount(dir) >= limit {
+					return
+				}
+			} else {
+				s.closeAllAt(price, b, "reverse")
+			}
+		}
 	}
 	qty := it.Qty
 	if qty <= 0 {
@@ -411,6 +484,10 @@ func (s *Sim) defaultQty(dir int, price float64) float64 {
 }
 
 func (s *Sim) applyFill(id string, dir int, qty float64, price float64, b int) {
+	// Slippage: every fill shifts against the trader — buys fill higher,
+	// sells fill lower. Applied at the entry choke point so entries,
+	// reversals and adds all see the slipped price.
+	price = s.applySlippage(price, dir > 0)
 	existing := s.positions[id]
 	if existing == nil {
 		existing = &Position{ID: id, FromBar: b}
@@ -503,6 +580,10 @@ func (s *Sim) realize(id string, closeQty float64, price float64, b int, reason 
 	if cl > math.Abs(p.Qty) {
 		cl = math.Abs(p.Qty)
 	}
+	// Slippage: closing a long is a sell (fill lower), closing a short is
+	// a buy (fill higher). Applied at the exit choke point so market exits,
+	// stop/limit fills, reversals and close_all all see the slipped price.
+	price = s.applySlippage(price, dir < 0)
 	pnl := float64(dir) * (price - p.Avg) * cl
 	t := Trade{
 		EntryID: id, Qty: cl, Dir: dir, EntryPrice: p.Avg, ExitPrice: price,
@@ -545,55 +626,93 @@ func (s *Sim) realizeFirst(qty float64, price float64, b int, reason string) {
 }
 
 // processConditionals evaluates resting conditional orders against bar b's
-// range and updates trailing stops.
+// range and updates trailing stops. Conditional orders submitted during bar
+// b's own evaluation only become active on bar b+1 (same anti-look-ahead rule
+// as market orders).
 func (s *Sim) processConditionals(b int) {
 	if b < 0 || b >= len(s.Bars) {
 		return
 	}
 	bar := s.Bars[b]
 
-	// 1. trail & bracket exits for open positions
-	braces := map[string]bracket{}
+	// 0. Split the resting orders: those submitted during this bar's own
+	// evaluation are not active yet and stay pending for the next bar.
+	deferred := []CondOrder{}
+	keep := []CondOrder{} // exit orders that remain resting after this bar
 	orderCond := []CondOrder{}
+	braces := map[string]bracket{}
+	trailSeen := map[string]int{} // position id -> direction of trailing exit
 	for _, c := range s.pendingCond {
+		if c.FromBar >= b {
+			deferred = append(deferred, c)
+			continue
+		}
 		if c.Kind != "exit" {
 			orderCond = append(orderCond, c)
 			continue
 		}
-		// resolve against matching entry
-		apply := c.EntryID
-		if apply == "" {
-			continue // whole-position exits handled via aggregate
-		}
-		p, ok := s.positions[apply]
-		if !ok || math.Abs(p.Qty) < 1e-12 {
-			continue // entry no longer open; drop exit
-		}
-		dir := signOf(p.Qty)
-		stop := c.Stop
-		lim := c.Limit
-		if c.Loss > 0 {
-			stop = stopAt(p, c.Loss, true)
-		}
-		if c.Profit > 0 {
-			lim = stopAt(p, c.Profit, false)
-		}
-		if c.TrailPts > 0 {
-			if dir > 0 {
-				p.TrailHi = math.Max(p.TrailHi, bar.H)
-				ts := p.TrailHi - c.TrailPts - c.TrailOff
-				if stop == 0 || ts > stop {
-					stop = ts
-				}
-			} else {
-				p.TrailLo = math.Min(p.TrailLo, bar.L)
-				ts := p.TrailLo + c.TrailPts + c.TrailOff
-				if stop == 0 || ts < stop {
-					stop = ts
+		// Exit order: resolve the position(s) it applies to. An empty
+		// from_entry applies to every open position (TradingView semantics);
+		// it was previously dropped entirely, silently disarming stops.
+		targets := []string{}
+		if c.EntryID != "" {
+			if p, ok := s.positions[c.EntryID]; ok && math.Abs(p.Qty) > 1e-12 {
+				targets = append(targets, c.EntryID)
+			}
+		} else {
+			for id, p := range s.positions {
+				if math.Abs(p.Qty) > 1e-12 {
+					targets = append(targets, id)
 				}
 			}
+			sort.Strings(targets)
 		}
-		braces[apply] = mergeBracket(braces[apply], bracket{entryID: apply, stop: stop, limit: lim})
+		if len(targets) == 0 {
+			// Nothing to attach to. If the order armed before, its entry is
+			// gone — drop it (TV cancels exits when their entries close).
+			// Otherwise keep it resting: the entry may fill on a later bar
+			// (common same-bar strategy.entry + strategy.exit declarations
+			// previously lost their stops entirely).
+			if c.Armed {
+				continue
+			}
+			keep = append(keep, c)
+			continue
+		}
+		c.Armed = true
+		keep = append(keep, c)
+		for _, apply := range targets {
+			p := s.positions[apply]
+			dir := signOf(p.Qty)
+			stop := c.Stop
+			lim := c.Limit
+			if c.Loss > 0 {
+				stop = stopAt(p, c.Loss, true)
+			}
+			if c.Profit > 0 {
+				lim = stopAt(p, c.Profit, false)
+			}
+			if c.TrailPts > 0 {
+				if dir > 0 {
+					// The trail level for this bar must be derived from the
+					// extreme through the PREVIOUS bar: raising the trail with
+					// this bar's high and then triggering on this bar's low
+					// assumes the high traded before the low, which
+					// manufactures same-bar profits.
+					ts := p.TrailHi - c.TrailPts - c.TrailOff
+					if stop == 0 || ts > stop {
+						stop = ts
+					}
+				} else {
+					ts := p.TrailLo + c.TrailPts + c.TrailOff
+					if stop == 0 || ts < stop {
+						stop = ts
+					}
+				}
+				trailSeen[apply] = dir
+			}
+			braces[apply] = mergeBracket(braces[apply], bracket{entryID: apply, stop: stop, limit: lim})
+		}
 	}
 
 	// execute brackets (conservative stop-first)
@@ -612,6 +731,29 @@ func (s *Sim) processConditionals(b int) {
 		} else {
 			continue
 		}
+		// A level already beyond the bar's open (invalid placement — e.g. a
+		// long stop above the market — or a gap through the level) fills at
+		// the open. Filling at the raw level transacted at a price the market
+		// never traded (worst case seen: long stops at 100x market price)
+		// and manufactured astronomical returns.
+		if dir > 0 {
+			// long: buys fill at the higher open, sells at the lower open
+			if reason == "stop_loss" && bar.O < fill {
+				fill = bar.O
+			}
+			if reason == "take_profit" && bar.O > fill {
+				fill = bar.O
+			}
+		} else {
+			// short: stop is a buy (fill at the higher open when gapped),
+			// take-profit is a buy below (fill at the lower open when gapped)
+			if reason == "stop_loss" && bar.O > fill {
+				fill = bar.O
+			}
+			if reason == "take_profit" && bar.O < fill {
+				fill = bar.O
+			}
+		}
 		// close the qty this bracket applies to (qty is whole position here)
 		s.realize(id, -float64(dir)*math.Abs(p.Qty), fill, b, reason)
 		// record a signal with the actual price
@@ -622,6 +764,10 @@ func (s *Sim) processConditionals(b int) {
 	still := orderCond[:0]
 	for _, c := range orderCond {
 		if c.Kind != "entry_stop" && c.Kind != "entry_limit" {
+			continue
+		}
+		if c.FromBar >= b {
+			still = append(still, c) // submitted this bar: activates next bar
 			continue
 		}
 		var trig bool
@@ -638,11 +784,34 @@ func (s *Sim) processConditionals(b int) {
 		if c.Kind == "entry_limit" {
 			price = c.Limit
 		}
+		// A level already beyond the bar's open (invalid placement — e.g. a
+		// long stop-entry far below the market — or a gap through it) fills
+		// at the open. Filling at the raw level bought far below the market
+		// and booked instant mark-to-market windfalls.
+		if c.Dir > 0 && price < bar.O {
+			price = bar.O
+		}
+		if c.Dir < 0 && price > bar.O {
+			price = bar.O
+		}
 		it := Intent{ID: c.ID, Dir: c.Dir, Qty: c.Qty, OCA: c.OCA, When: true}
 		s.executeEntry(it, c.Dir, price, b)
 		// note: executeEntry cancels OCA group
 	}
-	s.pendingCond = still
+	s.pendingCond = append(append(deferred, keep...), still...)
+
+	// 2b. Update trailing extremes AFTER level computation and fills, so the
+	// next bar's trail uses this bar's high/low but this bar's trigger check
+	// did not.
+	for apply, dir := range trailSeen {
+		if p, ok := s.positions[apply]; ok {
+			if dir > 0 {
+				p.TrailHi = math.Max(p.TrailHi, bar.H)
+			} else {
+				p.TrailLo = math.Min(p.TrailLo, bar.L)
+			}
+		}
+	}
 }
 
 // stopAt computes stop/target prices from an average price and a distance.

@@ -477,7 +477,7 @@ func (r *Runtime) callBuiltin(name string, rawArgs []*Expr, args []interface{}) 
 			out = append(out, pm.data[k])
 		}
 		return out, true, nil
-	case "array.new_int", "array.new_float", "array.new_bool", "array.new_string", "array.new_box", "array.new_label", "array.new_polyline", "array.new_chart_point":
+	case "array.new", "array.new_int", "array.new_float", "array.new_bool", "array.new_string", "array.new_box", "array.new_label", "array.new_polyline", "array.new_chart_point":
 		sz := 0
 		if len(args) > 0 {
 			f, _ := toFloat(args[0])

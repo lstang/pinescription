@@ -185,7 +185,7 @@ func (r *Runner) buildEngine() (*pinego.Engine, error) {
 		// no tuple for it, so approximate with a float map-like value is not
 		// possible. Return close as a single-value approximation is wrong for
 		// tuple unpacking; instead register noop that returns current close.
-		return lastClose(r.sim), nil
+		return r.currentClose(), nil
 	})
 	// fill accepts both the v4 positional (h1, h2, color, ...) and the v5
 	// named plot1=/plot2=/top_color= forms; the handler is a noop so the extra
@@ -249,6 +249,13 @@ func (r *Runner) buildEngine() (*pinego.Engine, error) {
 		}
 		if v := numArg(argAt(args, 8)); !math.IsNaN(v) && v > 0 {
 			d.InitialCapital = v
+			// Re-seed the account: NewSim ran before this hook could fire, so
+			// cash was seeded from the default capital while metrics divide by
+			// the declared one (e.g. initial_capital=1 inflated returns 10000x).
+			// Safe here: the hook only runs during bar-0 evaluation, before the
+			// first Step can fill anything.
+			r.sim.cash = v
+			r.sim.eqPrev = v
 		}
 		d.ProcessOrdersOnClose = boolArg(argAt(args, 10), false)
 		if p := numArg(argAt(args, 16)); !math.IsNaN(p) {
@@ -266,6 +273,11 @@ func (r *Runner) buildEngine() (*pinego.Engine, error) {
 		}
 		if v := numArg(argAt(args, 12)); !math.IsNaN(v) {
 			d.CommissionValue = v
+		}
+		// slippage is declared in ticks; without a tick-size model we
+		// approximate each tick as 1 basis point of price.
+		if v := numArg(argAt(args, 13)); !math.IsNaN(v) && v > 0 {
+			d.Slippage = v * 0.0001
 		}
 		return nil, nil
 	})
@@ -351,10 +363,9 @@ func (r *Runner) buildEngine() (*pinego.Engine, error) {
 		if math.Abs(it.Loss) < 1e-12 && math.Abs(it.Profit) < 1e-12 &&
 			math.Abs(it.Limit) < 1e-12 && math.Abs(it.Stop) < 1e-12 &&
 			math.Abs(it.TrailPts) < 1e-12 && math.Abs(it.TrailOff) < 1e-12 {
-			// pure market exit (no stop/profit levels)
-			if it.When {
-				r.sim.AddIntent(it)
-			}
+			// TradingView ignores a strategy.exit call without any exit level
+			// (e.g. stop=na before a trailing stop activates). Treating it as
+			// a market exit churned positions the script meant to keep open.
 			return nil, nil
 		}
 		if it.When {
@@ -515,7 +526,7 @@ func (r *Runner) buildEngine() (*pinego.Engine, error) {
 		return fnum(float64(n))
 	})
 	reg("strategy.netprofit", nil, func(args ...interface{}) (interface{}, error) {
-		return fnum(r.sim.EquityNow(lastClose(r.sim)) - initialCap(r.sim))
+		return fnum(r.sim.EquityNow(r.currentClose()) - initialCap(r.sim))
 	})
 	reg("strategy.grossprofit", nil, func(args ...interface{}) (interface{}, error) {
 		var g float64
@@ -540,16 +551,22 @@ func (r *Runner) buildEngine() (*pinego.Engine, error) {
 		if math.Abs(q) < 1e-12 {
 			return 0.0, nil
 		}
-		return fnum(q * (lastClose(r.sim) - r.sim.PositionAvg()))
+		return fnum(q * (r.currentClose() - r.sim.PositionAvg()))
 	})
 	reg("strategy.equity", nil, func(args ...interface{}) (interface{}, error) {
-		return fnum(r.sim.EquityNow(lastClose(r.sim)))
+		return fnum(r.sim.EquityNow(r.currentClose()))
 	})
 	reg("strategy.cash", nil, func(args ...interface{}) (interface{}, error) {
 		return fnum(r.sim.cash)
 	})
 	reg("strategy.max_drawdown", nil, func(args ...interface{}) (interface{}, error) {
-		return fnum(maxDrawdown(r.sim.Equity, initialCap(r.sim)))
+		// Equity slots at/after the bar being evaluated are not marked yet
+		// (they are zero-valued); slicing prevents fake drawdowns from zeros.
+		eq := r.sim.Equity
+		if r.currentBar >= 0 && r.currentBar < len(eq) {
+			eq = eq[:r.currentBar]
+		}
+		return fnum(maxDrawdown(eq, initialCap(r.sim)))
 	})
 
 	return e, nil
@@ -568,6 +585,24 @@ func lastClose(s *Sim) float64 {
 		return 0
 	}
 	return s.Bars[len(s.Bars)-1].C
+}
+
+// currentClose returns the close of the bar currently being evaluated by the
+// script. Hook points like strategy.equity must never use lastClose: that is
+// the final bar of the whole series and leaks future prices into the script.
+func (r *Runner) currentClose() float64 {
+	s := r.sim
+	if len(s.Bars) == 0 {
+		return 0
+	}
+	b := r.currentBar
+	if b < 0 {
+		b = 0
+	}
+	if b >= len(s.Bars) {
+		b = len(s.Bars) - 1
+	}
+	return s.Bars[b].C
 }
 
 func maxDrawdown(eq []float64, init float64) float64 {

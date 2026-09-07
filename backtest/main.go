@@ -619,13 +619,25 @@ func runOne(opt options, e EntryMeta, symbol string) *Result {
 	}
 
 	_, _, err = engine.ExecuteStepped(bc, func(barIdx int) error {
-		runner.currentBar = barIdx
-		sim.Step(barIdx)
+		// Fill timing: this callback runs after bar barIdx's script evaluation,
+		// so we step bar barIdx+1 HERE — before the engine evaluates it. That
+		// fills bar barIdx's orders at bar barIdx+1's open, which is the first
+		// moment a close-derived signal is tradable. Stepping the current bar
+		// instead (or advancing currentBar late) let close-derived signals
+		// fill on their own bar's open — same-bar look-ahead bias that
+		// inflated returns to absurd magnitudes (10^60%+).
+		if barIdx == 0 {
+			sim.Equity[0] = initialCap(sim)
+		}
+		if barIdx+1 < len(provider.bars) {
+			sim.Step(barIdx + 1)
+		}
 		if runner.err != nil {
 			e := runner.err
 			runner.err = nil
 			return e
 		}
+		runner.currentBar = barIdx + 1
 		return nil
 	})
 	if err != nil {

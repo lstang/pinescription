@@ -8,7 +8,7 @@ backtest harness.
 
 Usage:
     python extract.py --strategies F:/dev/test/fmzquant-strategies \
-                      --manifest F:/pitrading/_bt_cache/manifest.json
+                      --manifest ./_bt_cache/manifest.json
 """
 import argparse
 import json

@@ -15,7 +15,7 @@ recovered in-process). This loop:
 Usage:
     python backtest/supervise.py [--workers 4]
 
-State is tracked in F:/pitrading/_bt_cache:
+State is tracked in <module root>/_bt_cache:
   results.jsonl  - one compact record per completed strategy
   blacklist.txt  - slugs that crash the engine and are skipped
   run_full2.log  - appended harness output
@@ -33,7 +33,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 MODULE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CACHE = "F:/pitrading/_bt_cache"
+CACHE = os.path.join(MODULE_ROOT, "_bt_cache")
 RESULTS = os.path.join(CACHE, "results.jsonl")
 BLACKLIST = os.path.join(CACHE, "blacklist.txt")
 MANIFEST = os.path.join(CACHE, "manifest.json")

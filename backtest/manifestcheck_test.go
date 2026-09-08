@@ -17,7 +17,7 @@ import (
 //   <cache>/report_dbg/manifestcheck.txt   slug \t status \t error
 //   <cache>/report_dbg/mpre/<slug>.pine    fresh preprocessed source
 func TestManifestCheck(t *testing.T) {
-	cache := `F:/pitrading/_bt_cache`
+	cache := `../_bt_cache`
 
 	// last status per slug from results.jsonl
 	last := map[string]string{}

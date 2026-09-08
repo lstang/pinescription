@@ -42,6 +42,9 @@ func (rec ResultRecord) toResult() *Result {
 }
 
 func resultsStatePath(opt options) string {
+	if opt.resultsPath != "" {
+		return opt.resultsPath
+	}
 	return filepath.Join(opt.cacheDir, "results.jsonl")
 }
 
@@ -150,6 +153,8 @@ type options struct {
 	profileSlug    string
 	blacklist      string
 	slugs          string
+	zeroCost       bool
+	resultsPath    string
 }
 
 func main() {
@@ -164,7 +169,7 @@ func main() {
 func parseFlags() options {
 	var o options
 	flag.StringVar(&o.strategiesDir, "strategies", "F:/dev/test/fmzquant-strategies", "strategy markdown directory")
-	flag.StringVar(&o.cacheDir, "cache", "F:/pitrading/_bt_cache", "symbol CSV cache dir")
+	flag.StringVar(&o.cacheDir, "cache", "./_bt_cache", "symbol CSV cache dir (relative to the working directory)")
 	flag.StringVar(&o.manifestPath, "manifest", "", "manifest json path (default <cache>/manifest.json)")
 	flag.StringVar(&o.reportDir, "report", "", "report output dir (default <strategies>/report)")
 	flag.StringVar(&o.parquetPath, "parquet", "F:/pitrading/topNFixed.parquet", "source parquet path")
@@ -180,6 +185,8 @@ func parseFlags() options {
 	flag.BoolVar(&o.verbose, "verbose", false, "verbose logging")
 	flag.StringVar(&o.profileSlug, "profile-slug", "", "run a single strategy and dump goroutine stacks every 2s (debug hangs)")
 	flag.StringVar(&o.blacklist, "blacklist", "", "file with slugs to skip (one per line)")
+	flag.BoolVar(&o.zeroCost, "zero-cost", false, "zero the default commission/slippage (strategies declaring their own costs keep them)")
+	flag.StringVar(&o.resultsPath, "results", "", "override results.jsonl path (default <cache>/results.jsonl)")
 	flag.Parse()
 
 	if o.manifestPath == "" {
@@ -591,6 +598,13 @@ func runOne(opt options, e EntryMeta, symbol string) *Result {
 	res.Prepared = prepared
 
 	sim := NewSim(provider.bars, defDecl())
+	if opt.zeroCost {
+		// Zero the engine-default costs; a strategy() hook that declares its
+		// own commission/slippage still overrides these afterwards.
+		sim.Decl.CommissionType = "percent"
+		sim.Decl.CommissionValue = 0
+		sim.Decl.Slippage = 0
+	}
 	runner := &Runner{sim: sim}
 	engine, err := runner.buildEngine()
 	if err != nil {

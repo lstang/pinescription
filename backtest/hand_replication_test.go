@@ -11,7 +11,7 @@ import (
 // matches the engine's 10^58 result, the numbers are a property of the
 // strategy+data, not a sim bug.
 func TestHandReplicatedWoodie(t *testing.T) {
-	provider, err := LoadCSVProvider("AAPL", "F:/pitrading/_bt_cache/AAPL.csv")
+	provider, err := LoadCSVProvider("AAPL", "../_bt_cache/AAPL.csv")
 	if err != nil {
 		t.Skipf("no AAPL data: %v", err)
 	}

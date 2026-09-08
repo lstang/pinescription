@@ -10,7 +10,7 @@ The symbol CSV cache lives under the cache directory as <SYMBOL>.csv with a
 sidecar <SYMBOL>.meta.json recording the source.
 
 Usage:
-    python dataprep.py --cache F:/pitrading/_bt_cache \
+    python dataprep.py --cache ./_bt_cache \
                        --parquet F:/pitrading/topNFixed.parquet \
                        --symbols AAPL,BTC-USD
 """

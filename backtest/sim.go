@@ -143,6 +143,14 @@ type Sim struct {
 	cash  float64
 	eqPrev float64 // equity marked at prior close (for % sizing)
 
+	// Margin-call liquidation: once marked equity reaches zero, the account
+	// is wiped and no further orders fill (bankruptcy floor). Without this,
+	// shorts and over-leveraged entries could drive equity arbitrarily
+	// negative — a -10^13% "return" no real account can produce.
+	wiped   bool
+	wipedBar int
+	wipeCount int
+
 	Equity  []float64 // marked at each bar close
 	Trades  []Trade
 	Signals []Signal
@@ -190,6 +198,33 @@ func (s *Sim) PositionAvg() float64 {
 // EquityNow marks equity at the given price.
 func (s *Sim) EquityNow(price float64) float64 {
 	return s.cash + s.PositionSize()*price
+}
+
+// checkMarginCall enforces the physical bankruptcy floor. Called at each bar
+// close: if marked equity has reached zero, all positions are liquidated at
+// that close (booked as a margin_call trade), the account is wiped to zero
+// and further order fills are locked out for the rest of the run.
+func (s *Sim) checkMarginCall(b int) {
+	if s.wiped {
+		return
+	}
+	eq := s.EquityNow(s.Bars[b].C)
+	if eq > 0 {
+		return
+	}
+	s.wiped = true
+	s.wipedBar = b
+	s.wipeCount++
+	// Liquidate everything at the close, then zero the account.
+	s.closeAllAt(s.Bars[b].C, b, "margin_call")
+	// closeAllAt realizes losses into cash; force the residual (negative)
+	// equity to exactly zero — the broker ate the remainder beyond margin.
+	s.cash = 0
+	s.eqPrev = 0
+	s.Equity[b] = 0
+	// Drop all resting orders; nothing may fill after bankruptcy.
+	s.pendingMarket = nil
+	s.pendingCond = nil
 }
 
 // AddIntent is invoked by the strategy.* hooks during the current bar's eval.
@@ -320,6 +355,7 @@ func (s *Sim) Step(b int) {
 		return
 	}
 	s.Equity[b] = s.EquityNow(s.Bars[b].C)
+	s.checkMarginCall(b)
 	s.eqPrev = s.Equity[b]
 	if math.Abs(s.PositionSize()) > 1e-12 {
 		s.Exposure++
@@ -349,6 +385,11 @@ func negateDir(d float64) int {
 // signal is derived from bar b's close, so filling on bar b's own open is
 // same-bar look-ahead bias that massively inflates backtest returns.
 func (s *Sim) fillMarketOrders(b int) {
+	if s.wiped {
+		// Bankrupt: drop everything, fill nothing.
+		s.pendingMarket = nil
+		return
+	}
 	if len(s.pendingMarket) == 0 {
 		return
 	}
@@ -408,6 +449,10 @@ func (s *Sim) sameDirEntryCount(dir int) int {
 
 func (s *Sim) executeEntry(it Intent, dir int, price float64, b int) {
 	if price <= 0 {
+		return
+	}
+	if s.wiped {
+		// Account is bankrupt (margin-called): no further fills, ever.
 		return
 	}
 	cur := signOf(s.PositionSize())
@@ -630,6 +675,11 @@ func (s *Sim) realizeFirst(qty float64, price float64, b int, reason string) {
 // b's own evaluation only become active on bar b+1 (same anti-look-ahead rule
 // as market orders).
 func (s *Sim) processConditionals(b int) {
+	if s.wiped {
+		// Bankrupt: no resting order may trigger; wipe any residue.
+		s.pendingCond = nil
+		return
+	}
 	if b < 0 || b >= len(s.Bars) {
 		return
 	}

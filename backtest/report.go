@@ -304,29 +304,36 @@ func writeIndex(reportDir string, results []*Result, counts map[string]int, runM
 	b.WriteString(fmt.Sprintf("- Compiled: %d, executed OK: %d\n", counts["pine"], ok))
 	b.WriteString("\nLink: [index.csv](index.csv) — full machine-readable results for every strategy.\n\n")
 
-	// sort successful by return desc
+	// Rank successful runs by Sortino desc, but only plausible strategies:
+	// positive total return and bounded drawdown. Without the filter the
+	// top of the ranking is dominated by negative-equity artifacts of the
+	// no-margin-model sim (tiny downside deviation -> huge Sortino on
+	// strategies that lose everything).
 	sortable := make([]*Result, 0, len(results))
 	for _, r := range results {
-		if r.Status == "ok" {
+		if r.Status == "ok" && r.Metrics.ReturnPct > 0 && r.Metrics.MaxDrawdown <= 1000 {
 			sortable = append(sortable, r)
 		}
 	}
 	if len(sortable) > 0 {
-		b.WriteString("## Best performers (by total return)\n\n")
+		b.WriteString("## Best performers (by Sortino ratio; positive-return strategies only)\n\n")
 		sort.Slice(sortable, func(i, j int) bool {
+			if sortable[i].Metrics.Sortino != sortable[j].Metrics.Sortino {
+				return sortable[i].Metrics.Sortino > sortable[j].Metrics.Sortino
+			}
 			return sortable[i].Metrics.ReturnPct > sortable[j].Metrics.ReturnPct
 		})
 		limit := 30
 		if len(sortable) < limit {
 			limit = len(sortable)
 		}
-		b.WriteString("| Rank | Strategy | Symbol | Return | CAGR | Sharpe | MaxDD | Trades | Win rate | Link |\n|---|---|---|---|---|---|---|---|---|---|\n")
+		b.WriteString("| Rank | Strategy | Symbol | Return | CAGR | Sharpe | Sortino | MaxDD | Trades | Win rate | Link |\n|---|---|---|---|---|---|---|---|---|---|---|\n")
 		for i := 0; i < limit; i++ {
 			r := sortable[i]
 			m := r.Metrics
-			b.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s | %s | %s | %d | %s | [report](strategies/%s.md) |\n",
+			b.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s | %s | %s | %s | %d | %s | [report](strategies/%s.md) |\n",
 				i+1, safeTitle(r.Entry.Title), r.Symbol, pct1(m.ReturnPct), pct1(m.CAGR),
-				f2(m.Sharpe), pct1(m.MaxDrawdown), m.NTrades, pct1(m.WinRate), sanitizeName(r.Entry.Slug)))
+				f2(m.Sharpe), f2(m.Sortino), pct1(m.MaxDrawdown), m.NTrades, pct1(m.WinRate), sanitizeName(r.Entry.Slug)))
 		}
 		b.WriteString("\n")
 	}

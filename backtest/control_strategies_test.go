@@ -9,7 +9,7 @@ import (
 // the final equity with hand-computed buy & hold (initial capital fully
 // invested at the first fill, then held).
 func TestControlAlwaysLong(t *testing.T) {
-	provider, err := LoadCSVProvider("AAPL", "F:/pitrading/_bt_cache/AAPL.csv")
+	provider, err := LoadCSVProvider("AAPL", "../_bt_cache/AAPL.csv")
 	if err != nil {
 		t.Skipf("no AAPL data: %v", err)
 	}
@@ -24,7 +24,7 @@ if bar_index == 0
 // TestControlAlwaysShort runs an always-short strategy over AAPL; a 6000x
 // uptrend must destroy a short, not enrich it.
 func TestControlAlwaysShort(t *testing.T) {
-	provider, err := LoadCSVProvider("AAPL", "F:/pitrading/_bt_cache/AAPL.csv")
+	provider, err := LoadCSVProvider("AAPL", "../_bt_cache/AAPL.csv")
 	if err != nil {
 		t.Skipf("no AAPL data: %v", err)
 	}
@@ -70,8 +70,20 @@ func runControl(t *testing.T, bars []Bar, name, src string) {
 	m := computeMetrics(sim)
 	fmt.Printf("[%s] trades=%d return=%.2f%% buyhold=%.2f%% finalEquity=%.2f maxDD=%.2f%%\n",
 		name, m.NTrades, m.ReturnPct, m.BuyHoldReturn, m.FinalEquity, m.MaxDrawdown)
-	// Invariants
-	if m.FinalEquity <= 0 && m.NTrades > 0 {
-		t.Errorf("[%s] final equity %.2f went negative — marginless accounting bug", name, m.FinalEquity)
+	// Invariants: equity may be wiped to exactly 0 by a margin call (the
+	// physical bankruptcy floor), but never below it, and never "resurrected"
+	// after the wipe.
+	if m.FinalEquity < 0 {
+		t.Errorf("[%s] final equity %.2f went negative — margin-call floor failed", name, m.FinalEquity)
+	}
+	sawWipe := false
+	for _, tr := range sim.Trades {
+		if tr.Reason == "margin_call" {
+			sawWipe = true
+			break
+		}
+	}
+	if sim.wiped != sawWipe {
+		t.Errorf("[%s] wiped=%v but margin_call trade present=%v", name, sim.wiped, sawWipe)
 	}
 }

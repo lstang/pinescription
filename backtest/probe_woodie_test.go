@@ -10,7 +10,7 @@ import (
 // TestProbeWoodieMultipliers measures per-trade equity growth factors for the
 // Woodie pivot strategy over full AAPL data and prints the largest ones.
 func TestProbeWoodieMultipliers(t *testing.T) {
-	provider, err := LoadCSVProvider("AAPL", "F:/pitrading/_bt_cache/AAPL.csv")
+	provider, err := LoadCSVProvider("AAPL", "../_bt_cache/AAPL.csv")
 	if err != nil {
 		t.Skipf("no AAPL data: %v", err)
 	}

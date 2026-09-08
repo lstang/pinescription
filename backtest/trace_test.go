@@ -10,7 +10,7 @@ import (
 
 // TestTraceBisect: bisect the pipeline by testing candidate stage outputs.
 func TestTraceBisect(t *testing.T) {
-	data, err := os.ReadFile(`F:/pitrading/_bt_cache/manifest.json`)
+	data, err := os.ReadFile(`../_bt_cache/manifest.json`)
 	if err != nil {
 		t.Fatal(err)
 	}

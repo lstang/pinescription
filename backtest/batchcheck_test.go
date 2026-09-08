@@ -16,7 +16,7 @@ import (
 // flagged as COMPILE_OK (they need runtime fixes / source hand-fixes, and
 // full re-execution happens in the harness).
 func TestBatchCheck(t *testing.T) {
-	cache := `F:/pitrading/_bt_cache`
+	cache := `../_bt_cache`
 	dirs := []string{filepath.Join(cache, "debug"), filepath.Join(cache, "debug_exec")}
 	files := map[string]string{} // name -> path
 	for _, d := range dirs {

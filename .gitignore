@@ -40,3 +40,6 @@ AGENTS.md
 scratch/
 backtest/__pycache__/
 backtest/*.pine
+
+# Local backtest cache (price data, manifest, results)
+_bt_cache/
